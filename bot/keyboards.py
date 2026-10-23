@@ -20,11 +20,12 @@ def build_main_menu(task_id: str) -> List[List[Button]]:
 
 
 def build_optimize_menu(task_id: str) -> List[List[Button]]:
-    """Builds the 3 optimization sub-options menu."""
+    """Builds the 4 optimization sub-options menu."""
     return [
         [Button.inline("1. Low Device (Max Compatibility)", data=f"opt_run:low:{task_id}".encode())],
         [Button.inline("2. Moderate (Mid-Range Device)", data=f"opt_run:mod:{task_id}".encode())],
         [Button.inline("3. Auto Recommended (Smart Fix)", data=f"opt_run:auto:{task_id}".encode())],
+        [Button.inline("4. Auto + Best Quality + Fix MB", data=f"opt_run:best:{task_id}".encode())],
         [Button.inline("< Back to Main Menu", data=f"main_menu:{task_id}".encode())]
     ]
 

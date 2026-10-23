@@ -49,6 +49,14 @@ async def test_optimizer_modes(sample_media: Path, tmp_path: Path):
     assert "-i" in auto_cmd
     assert len(explanation) > 0
 
+    # Test 4: Auto + Best Quality + Fix MB
+    best_cmd, best_exp = VideoOptimizer.build_best_quality_args(meta, out_file, current_hardware)
+    assert "-i" in best_cmd
+    assert str(out_file) in best_cmd
+    assert "Preserved 100% native" in best_exp
+    assert "-movflags" in best_cmd
+    assert "+faststart" in best_cmd
+
 
 @pytest.mark.asyncio
 async def test_converter_modes(sample_media: Path, tmp_path: Path):

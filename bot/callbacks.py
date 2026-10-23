@@ -90,7 +90,8 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             "**Select Optimization Mode:**\n\n"
             "**1. Low Device:** Max compatibility (H.264 Baseline/Main), lower bitrate for budget/older devices.\n"
             "**2. Moderate:** Balanced mid-range profile, crisp 1080p/720p clarity.\n"
-            "**3. Auto Recommended:** Smart analyzer automatically fixes high bitrate bloat (e.g. 500MB camera file) with zero perceptual quality loss."
+            "**3. Auto Recommended:** Smart analyzer automatically fixes high bitrate bloat with balanced sharing size.\n"
+            "**4. Auto + Best Quality + Fix MB:** 100% full original quality & native resolution (including 4K), untouched audio, eliminates camera bitrate bloat (e.g. 500MB -> pristine smaller MB)."
         )
         await event.edit(text, buttons=menu)
         return
@@ -538,7 +539,8 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
     mode_names = {
         "low": "Low Device Optimize",
         "mod": "Moderate Optimize",
-        "auto": "Auto Recommended"
+        "auto": "Auto Recommended",
+        "best": "Auto + Best Quality + Fix MB"
     }
     mode_label = mode_names.get(mode, "Optimization")
     
@@ -569,6 +571,8 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 cmd = VideoOptimizer.build_low_device_args(meta, out_path, current_hardware)
             elif mode == "mod":
                 cmd = VideoOptimizer.build_moderate_args(meta, out_path, current_hardware)
+            elif mode == "best":
+                cmd, explanation = VideoOptimizer.build_best_quality_args(meta, out_path, current_hardware)
             else:
                 cmd, explanation = VideoOptimizer.build_auto_recommended_args(meta, out_path, current_hardware)
 

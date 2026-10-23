@@ -5,6 +5,8 @@ Unit Tests for Files Manager, Recall System, and Keyboards
 import pytest
 from pathlib import Path
 from bot.keyboards import (
+    build_main_menu,
+    build_optimize_menu,
     build_files_list_menu,
     build_file_action_menu,
     build_recall_progress_menu,
@@ -36,6 +38,16 @@ def test_files_keyboards():
     stop_menu = build_confirm_stop_menu("rec123")
     assert any(b"yes_stop:rec123" in btn.type.data for row in stop_menu for btn in row)
     assert any(b"no_stop:rec123" in btn.type.data for row in stop_menu for btn in row)
+
+
+def test_optimize_menu():
+    menu = build_optimize_menu("task_abc")
+    assert len(menu) == 5  # 4 options + back button
+    assert b"opt_run:low:task_abc" in menu[0][0].type.data
+    assert b"opt_run:mod:task_abc" in menu[1][0].type.data
+    assert b"opt_run:auto:task_abc" in menu[2][0].type.data
+    assert b"opt_run:best:task_abc" in menu[3][0].type.data
+    assert b"main_menu:task_abc" in menu[4][0].type.data
 
 
 def test_recall_task_manager():
