@@ -109,28 +109,73 @@ optmizer/
 
 ### Option B: Running on Nokia 6.1 Plus (Termux Android 10)
 
-1. **Install Packages in Termux**:
+1. **Keep Termux Awake in Background**:
+   Android 10 puts the CPU to sleep when the screen locks. Run this once:
    ```bash
-   pkg update && pkg upgrade -y
-   pkg install -y python ffmpeg git clang libjpeg-turbo
+   termux-wake-lock
    ```
-2. **Clone or Copy Code to Termux**:
+   *(Also disable battery optimization for the Termux app in Android Settings -> Apps -> Termux -> Battery -> Unrestricted).*
+
+2. **Install Required Packages**:
+   In your Termux shell (zsh or bash):
    ```bash
-   cd ~
-   git clone <your-repo-or-transfer-folder> optmizer
-   cd optmizer
+   pkg update -y && pkg upgrade -y
+   pkg install -y python ffmpeg git clang libjpeg-turbo tmux
    ```
-3. **Set Up Virtual Environment**:
+
+3. **Transfer or Clone Project**:
+   - **Method 1: Transfer from PC via SSH/SCP**:
+     In Termux, start SSH:
+     ```bash
+     pkg install openssh
+     sshd
+     whoami    # shows your termux user (e.g. u0_a123)
+     passwd    # set a password
+     ifconfig  # find phone IP (e.g. 192.168.1.50)
+     ```
+     From Ubuntu PC:
+     ```bash
+     scp -P 8022 -r /home/snorlax/Desktop/POC/optmizer <termux_user>@<phone_ip>:~/
+     ```
+   - **Method 2: Clone from Git**:
+     ```bash
+     cd ~
+     git clone <your-repo-url> optmizer
+     ```
+
+4. **Initialize Virtual Environment**:
    ```bash
-   python3 -m venv .venv
+   cd ~/optmizer
+   python -m venv .venv
    .venv/bin/pip install --upgrade pip
    .venv/bin/pip install -r requirements.txt
    ```
-4. **Launch Bot**:
+
+5. **Ensure `.env` Credentials are Set**:
    ```bash
+   cat << 'EOF' > .env
+   BOT_TOKEN=your_bot_token_here
+   TELEGRAM_API_ID=your_api_id_here
+   TELEGRAM_API_HASH=your_api_hash_here
+   DOWNLOAD_DIR=storage/downloads
+   OUTPUT_DIR=storage/outputs
+   DB_PATH=database/optimizer.db
+   MAX_CONCURRENT_ENCODING=1
+   PROGRESS_UPDATE_INTERVAL=2.5
+   EOF
+   ```
+
+6. **Run 24/7 in Background using `tmux`**:
+   ```bash
+   tmux new -s bot
+   cd ~/optmizer
    .venv/bin/python run_bot.py
    ```
-   *The bot will detect Termux (`aarch64`), engage all 8 Kryo 260 CPU cores (`-threads 8`), use thermal-efficient `veryfast` preset, and enforce single-job serialization to protect RAM.*
+   - **Detach from session**: Press `Ctrl + b`, then release and press `d`. The bot keeps running in the background even if you close the Termux app!
+   - **Re-attach to check logs**: `tmux attach -t bot`
+   - **Stop the bot**: `tmux kill-session -t bot`
+
+*Note: The bot auto-detects Termux (`aarch64`), engages all 8 Kryo 260 CPU cores (`-threads 8`), uses thermal-efficient `veryfast` preset, and enforces single-worker serialization to keep your Nokia 6.1 Plus cool and stable.*
 
 ---
 
