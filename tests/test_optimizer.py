@@ -5,7 +5,7 @@ Unit Tests for Video Optimizer Command Builders
 import pytest
 import subprocess
 from pathlib import Path
-from core.probe import probe_media
+from core.probe import probe_media, MediaMetadata
 from core.optimizer import VideoOptimizer
 from core.converter import VideoConverter
 from core.hardware import current_hardware
@@ -28,6 +28,135 @@ def sample_media(tmp_path_factory) -> Path:
     return video_path
 
 
+def test_scale_filter_orientation():
+    # 1. Vertical / portrait 4K (2160x3840)
+    meta_vert_4k = MediaMetadata(
+        file_path=Path("/tmp/fake.mp4"),
+        file_name="vert_4k.mp4",
+        file_size_bytes=1000,
+        duration_seconds=10.0,
+        container_format="mp4",
+        has_video=True,
+        video_codec="hevc",
+        width=2160,
+        height=3840,
+        fps=60.0,
+        video_bitrate_kbps=5000,
+        has_audio=True,
+        audio_codec="aac",
+        audio_channels=2,
+        audio_sample_rate=44100,
+        audio_bitrate_kbps=128,
+        overall_bitrate_kbps=5128,
+        is_high_bitrate=False,
+        raw_info={}
+    )
+    # Target 720p: should scale width to 720
+    assert VideoOptimizer.get_scale_filter(meta_vert_4k, 720) == "scale=720:-2"
+    # Target 1080p: should scale width to 1080
+    assert VideoOptimizer.get_scale_filter(meta_vert_4k, 1080) == "scale=1080:-2"
+
+    # 2. Horizontal / landscape 4K (3840x2160)
+    meta_horiz_4k = MediaMetadata(
+        file_path=Path("/tmp/fake.mp4"),
+        file_name="horiz_4k.mp4",
+        file_size_bytes=1000,
+        duration_seconds=10.0,
+        container_format="mp4",
+        has_video=True,
+        video_codec="hevc",
+        width=3840,
+        height=2160,
+        fps=60.0,
+        video_bitrate_kbps=5000,
+        has_audio=True,
+        audio_codec="aac",
+        audio_channels=2,
+        audio_sample_rate=44100,
+        audio_bitrate_kbps=128,
+        overall_bitrate_kbps=5128,
+        is_high_bitrate=False,
+        raw_info={}
+    )
+    # Target 720p: should scale height to 720
+    assert VideoOptimizer.get_scale_filter(meta_horiz_4k, 720) == "scale=-2:720"
+    # Target 1080p: should scale height to 1080
+    assert VideoOptimizer.get_scale_filter(meta_horiz_4k, 1080) == "scale=-2:1080"
+
+    # 3. Native 1080p vertical: target 1080 should not downscale
+    meta_vert_1080 = MediaMetadata(
+        file_path=Path("/tmp/fake.mp4"),
+        file_name="vert_1080.mp4",
+        file_size_bytes=1000,
+        duration_seconds=10.0,
+        container_format="mp4",
+        has_video=True,
+        video_codec="h264",
+        width=1080,
+        height=1920,
+        fps=30.0,
+        video_bitrate_kbps=3000,
+        has_audio=True,
+        audio_codec="aac",
+        audio_channels=2,
+        audio_sample_rate=44100,
+        audio_bitrate_kbps=128,
+        overall_bitrate_kbps=3128,
+        is_high_bitrate=False,
+        raw_info={}
+    )
+    assert VideoOptimizer.get_scale_filter(meta_vert_1080, 1080) is None
+    assert VideoOptimizer.get_scale_filter(meta_vert_1080, 720) == "scale=720:-2"
+
+
+def test_fps_filter():
+    meta_high_fps = MediaMetadata(
+        file_path=Path("/tmp/fake.mp4"),
+        file_name="high_fps.mp4",
+        file_size_bytes=1000,
+        duration_seconds=10.0,
+        container_format="mp4",
+        has_video=True,
+        video_codec="h264",
+        width=1920,
+        height=1080,
+        fps=120.0,
+        video_bitrate_kbps=3000,
+        has_audio=False,
+        audio_codec=None,
+        audio_channels=None,
+        audio_sample_rate=None,
+        audio_bitrate_kbps=None,
+        overall_bitrate_kbps=3000,
+        is_high_bitrate=False,
+        raw_info={}
+    )
+    assert VideoOptimizer.get_fps_filter(meta_high_fps, 60.0) == "fps=60"
+
+    meta_normal_fps = MediaMetadata(
+        file_path=Path("/tmp/fake.mp4"),
+        file_name="normal_fps.mp4",
+        file_size_bytes=1000,
+        duration_seconds=10.0,
+        container_format="mp4",
+        has_video=True,
+        video_codec="h264",
+        width=1920,
+        height=1080,
+        fps=60.0,
+        video_bitrate_kbps=3000,
+        has_audio=False,
+        audio_codec=None,
+        audio_channels=None,
+        audio_sample_rate=None,
+        audio_bitrate_kbps=None,
+        overall_bitrate_kbps=3000,
+        is_high_bitrate=False,
+        raw_info={}
+    )
+    assert VideoOptimizer.get_fps_filter(meta_normal_fps, 60.0) is None
+
+
 @pytest.mark.asyncio
 async def test_optimizer_modes(sample_media: Path, tmp_path: Path):
     meta = await probe_media(sample_media)
@@ -48,45 +177,6 @@ async def test_optimizer_modes(sample_media: Path, tmp_path: Path):
     auto_cmd, explanation = VideoOptimizer.build_auto_recommended_args(meta, out_file, current_hardware)
     assert "-i" in auto_cmd
     assert len(explanation) > 0
-
-    # Test 4: Auto + Best Quality + Fix Size
-    best_cmd, best_exp = VideoOptimizer.build_best_quality_args(meta, out_file, current_hardware)
-    assert "-i" in best_cmd
-    assert str(out_file) in best_cmd
-    assert "Preserved 100% native" in best_exp
-    assert "-movflags" in best_cmd
-    assert "+faststart" in best_cmd
-
-    # Test 5: 4K video handling ensures libx264 with maxrate under source bitrate
-    from core.probe import MediaMetadata
-    meta_4k = MediaMetadata(
-        file_path=sample_media,
-        file_name="4k_sample.mp4",
-        file_size_bytes=8000000,
-        duration_seconds=10.0,
-        container_format="mp4",
-        has_video=True,
-        video_codec="hevc",
-        width=2160,
-        height=3840,
-        fps=60.0,
-        video_bitrate_kbps=5800,
-        has_audio=True,
-        audio_codec="aac",
-        audio_channels=2,
-        audio_sample_rate=44100,
-        audio_bitrate_kbps=128,
-        overall_bitrate_kbps=5900,
-        is_high_bitrate=False,
-        raw_info={}
-    )
-    cmd_4k, exp_4k = VideoOptimizer.build_best_quality_args(meta_4k, out_file, current_hardware)
-    assert "libx264" in cmd_4k
-    assert "-maxrate" in cmd_4k
-    idx = cmd_4k.index("-maxrate")
-    rate_val = int(cmd_4k[idx + 1].replace("k", ""))
-    # Guarantee maxrate is strictly less than source bitrate (5800)
-    assert rate_val < 5800
 
 
 @pytest.mark.asyncio

@@ -42,12 +42,18 @@ def test_files_keyboards():
 
 def test_optimize_menu():
     menu = build_optimize_menu("task_abc")
-    assert len(menu) == 5  # 4 options + back button
+    assert len(menu) == 4  # 3 options + back button
     assert b"opt_run:low:task_abc" in menu[0][0].type.data
     assert b"opt_run:mod:task_abc" in menu[1][0].type.data
     assert b"opt_run:auto:task_abc" in menu[2][0].type.data
-    assert b"opt_run:best:task_abc" in menu[3][0].type.data
-    assert b"main_menu:task_abc" in menu[4][0].type.data
+    assert b"main_menu:task_abc" in menu[3][0].type.data
+
+    from bot.keyboards import build_cleanup_original_menu, build_cleanup_output_menu
+    clean_orig = build_cleanup_original_menu("task_abc")
+    assert any(b"retry_opt:task_abc" in btn.type.data for row in clean_orig for btn in row)
+
+    clean_out = build_cleanup_output_menu("task_abc")
+    assert any(b"retry_opt:task_abc" in btn.type.data for row in clean_out for btn in row)
 
 
 def test_recall_task_manager():
@@ -73,3 +79,24 @@ def test_recall_task_manager():
     removed = task_manager.remove_recall("rec_abc")
     assert removed is ctx
     assert task_manager.get_recall("rec_abc") is None
+
+
+def test_find_existing_server_file(tmp_path, monkeypatch):
+    from bot.media_handler import find_existing_server_file
+    from config.settings import settings
+
+    monkeypatch.setattr(settings, "DOWNLOAD_DIR", tmp_path)
+    sample_file = tmp_path / "task123_video_sample.mp4"
+    sample_file.write_bytes(b"A" * 1024)
+
+    # 1. Matching filename suffix and size
+    res = find_existing_server_file("video_sample.mp4", 1024)
+    assert res == sample_file
+
+    # 2. Mismatched size
+    res_wrong_size = find_existing_server_file("video_sample.mp4", 2048)
+    assert res_wrong_size is None
+
+    # 3. Nonexistent file
+    res_nonexistent = find_existing_server_file("other_video.mp4", 1024)
+    assert res_nonexistent is None

@@ -88,10 +88,9 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         menu = build_optimize_menu(task_id)
         text = (
             "**Select Optimization Mode:**\n\n"
-            "**1. Low Device:** Max compatibility (H.264 Baseline/Main), lower bitrate for budget/older devices.\n"
-            "**2. Moderate:** Balanced mid-range profile, crisp 1080p/720p clarity.\n"
-            "**3. Auto Recommended:** Smart analyzer automatically fixes high bitrate bloat with balanced sharing size.\n"
-            "**4. Auto + Best Quality + Fix Size:** 100% full original quality & native resolution (including 4K), untouched audio, eliminates camera bitrate bloat (e.g. 500MB -> pristine smaller size)."
+            "**1. Low Device (Max Compatibility):** Scales to 720p max (preserves <=720p), caps FPS at 60, moderates high bitrates for older & budget phones.\n"
+            "**2. Moderate (Mid-Range Device):** Scales to 1080p max (preserves <=1080p), caps FPS at 60, optimizes bitrate (~3 Mbps) for smooth mid-range smartphone playback.\n"
+            "**3. Auto Recommended (Smart Fix):** Universal smartphone compatibility, downscales 4K/2K to 1080p, fixes audio issues, caps FPS at 60, strictly reduces file size."
         )
         await event.edit(text, buttons=menu)
         return
@@ -202,6 +201,48 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         )
         await event.edit(final_text)
         await event.answer(alert_msg, alert=False)
+        return
+
+    # 5c. Try Another Optimization / Change with cached file
+    if action_type == "retry_opt":
+        task_id = parts[1]
+        task_ctx = task_manager.get_task(task_id)
+        cache = await get_file_cache(task_id)
+
+        in_path = None
+        if task_ctx and task_ctx.input_path and task_ctx.input_path.exists():
+            in_path = task_ctx.input_path
+        elif cache and cache.get("input_path") and (cache.get("input_deleted", 0) == 0):
+            cand = Path(cache["input_path"])
+            if cand.exists():
+                in_path = cand
+
+        if not in_path:
+            await event.answer("Original file is no longer available on server. Please send the video again.", alert=True)
+            return
+
+        meta = task_ctx.meta if (task_ctx and task_ctx.meta) else await probe_media(in_path)
+        if not task_ctx:
+            task_ctx = TaskContext(
+                task_id=task_id,
+                user_id=event.sender_id,
+                input_path=in_path,
+                output_path=None,
+                meta=meta,
+                status_message=event.message,
+                original_message_id=0,
+                t_received=time.time(),
+                download_time=0.0,
+                probe_time=0.0
+            )
+            task_manager.register_task(task_ctx)
+        else:
+            task_ctx.status_message = event.message
+
+        summary = meta.get_summary_card(current_hardware.description)
+        menu = build_main_menu(task_id)
+        await event.edit(summary, buttons=menu)
+        await event.answer("Ready! Select another optimization or conversion mode:")
         return
 
     # 6. Execute Optimization Job
@@ -539,8 +580,7 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
     mode_names = {
         "low": "Low Device Optimize",
         "mod": "Moderate Optimize",
-        "auto": "Auto Recommended",
-        "best": "Auto + Best Quality + Fix Size"
+        "auto": "Auto Recommended"
     }
     mode_label = mode_names.get(mode, "Optimization")
     
@@ -571,8 +611,6 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 cmd = VideoOptimizer.build_low_device_args(meta, out_path, current_hardware)
             elif mode == "mod":
                 cmd = VideoOptimizer.build_moderate_args(meta, out_path, current_hardware)
-            elif mode == "best":
-                cmd, explanation = VideoOptimizer.build_best_quality_args(meta, out_path, current_hardware)
             else:
                 cmd, explanation = VideoOptimizer.build_auto_recommended_args(meta, out_path, current_hardware)
 
@@ -671,11 +709,25 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 inc_pct = (inc_bytes / meta.file_size_bytes * 100)
                 reduction_str = f"+{inc_pct:.1f}% ({format_bytes(inc_bytes)} added for standard compatibility)"
 
-            # 1. Send media file without long caption
+            # 1. Probe output media for Before & After comparison and rich video caption
+            meta_after = await probe_media(out_path)
+            v_codec = (meta_after.video_codec or "h264").upper()
+            a_codec = (meta_after.audio_codec or "none").upper()
+            fps_val = round(meta_after.fps) if meta_after.fps else 0
+            fps_str = f" @ {fps_val}fps" if fps_val > 0 else ""
+
+            video_caption = (
+                f"**File:** `{out_name}`\n"
+                f"• **Quality:** {meta_after.resolution_label}{fps_str}\n"
+                f"• **Size:** {format_bytes(out_size)} ({reduction_str})\n"
+                f"• **Format:** MP4 ({v_codec} / {a_codec})"
+            )
+
+            # 2. Send media file with structured caption
             sent_msg = await client.send_file(
                 entity=user_id,
                 file=str(out_path),
-                caption=f"`{out_name}`",
+                caption=video_caption,
                 supports_streaming=True,
                 progress_callback=upload_progress
             )
@@ -685,8 +737,6 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
             total_pipeline_time = round(task_ctx.download_time + task_ctx.probe_time + transcode_time + upload_time, 1)
             total_overall_time = round(time.time() - task_ctx.t_received, 1) if task_ctx.t_received > 0 else total_pipeline_time
 
-            # 2. Probe output media for Before & After comparison
-            meta_after = await probe_media(out_path)
             analysis_md = format_before_after_analysis(before=meta, after=meta_after)
 
             # Format full time breakdown
@@ -847,20 +897,38 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                 )
                 await updater.update(text)
 
-            # 1. Send file or audio without long caption
+            # 1. Probe output media for Before & After comparison and rich caption
+            meta_after = await probe_media(out_path)
+            v_codec = (meta_after.video_codec or target_fmt).upper()
+            a_codec = (meta_after.audio_codec or "none").upper()
+            fps_val = round(meta_after.fps) if meta_after.fps else 0
+            fps_str = f" @ {fps_val}fps" if fps_val > 0 else ""
+
+            # 2. Send file or audio with structured caption
             if is_audio:
+                audio_caption = (
+                    f"**File:** `{out_name}`\n"
+                    f"• **Format:** {target_fmt.upper()} Audio ({a_codec})\n"
+                    f"• **Size:** {format_bytes(out_size)}"
+                )
                 sent_msg = await client.send_file(
                     entity=user_id,
                     file=str(out_path),
-                    caption=f"`{out_name}`",
+                    caption=audio_caption,
                     voice_note=False,
                     progress_callback=upload_progress
                 )
             else:
+                video_caption = (
+                    f"**File:** `{out_name}`\n"
+                    f"• **Quality:** {meta_after.resolution_label}{fps_str}\n"
+                    f"• **Size:** {format_bytes(out_size)}\n"
+                    f"• **Format:** {target_fmt.upper()} ({v_codec} / {a_codec})"
+                )
                 sent_msg = await client.send_file(
                     entity=user_id,
                     file=str(out_path),
-                    caption=f"`{out_name}`",
+                    caption=video_caption,
                     supports_streaming=True,
                     progress_callback=upload_progress
                 )
@@ -870,8 +938,6 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
             total_pipeline_time = round(task_ctx.download_time + task_ctx.probe_time + transcode_time + upload_time, 1)
             total_overall_time = round(time.time() - task_ctx.t_received, 1) if task_ctx.t_received > 0 else total_pipeline_time
 
-            # 2. Probe output media for Before & After comparison
-            meta_after = await probe_media(out_path)
             analysis_md = format_before_after_analysis(before=meta, after=meta_after)
 
             # Format full time breakdown

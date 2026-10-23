@@ -7,6 +7,8 @@ import time
 import uuid
 import logging
 from pathlib import Path
+import shutil
+from typing import Optional
 from telethon import events
 from config.settings import settings
 from core.probe import probe_media
@@ -18,6 +20,24 @@ from bot.progress import ThrottledMessageUpdater, format_progress_status
 from bot.task_manager import task_manager, TaskContext
 
 logger = logging.getLogger(__name__)
+
+
+def find_existing_server_file(clean_name: str, file_size: Optional[int]) -> Optional[Path]:
+    """
+    Checks if an identical file is already stored on server disk.
+    Matches filename ending with clean_name and matching exact byte size.
+    """
+    if not clean_name or not file_size or file_size <= 0:
+        return None
+    try:
+        if settings.DOWNLOAD_DIR.exists():
+            for p in settings.DOWNLOAD_DIR.iterdir():
+                if p.is_file():
+                    if (p.name == clean_name or p.name.endswith(f"_{clean_name}")) and p.stat().st_size == file_size:
+                        return p
+    except Exception as e:
+        logger.warning(f"Error checking existing server file: {e}")
+    return None
 
 
 def is_video_message(message) -> bool:
@@ -59,6 +79,7 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
         clean_name = f"video_{task_id}.mp4"
 
     save_path = settings.DOWNLOAD_DIR / f"{task_id}_{clean_name}"
+    message_file_size = getattr(message.file, "size", None) or getattr(message.video, "size", None) or getattr(message.document, "size", None)
 
     term_log("RECEIVE", f"Incoming video from user {user_id} ({file_name})", task_id=task_id)
 
@@ -86,14 +107,22 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
         await updater.update(text)
 
     try:
-        # Download media natively via Telethon MTProto chunked stream
-        await client.download_media(
-            message,
-            file=str(save_path),
-            progress_callback=download_progress
-        )
-        download_time = round(time.time() - start_time, 1)
-        term_log("DOWNLOAD", f"Download finished in {download_time}s: {clean_name}", task_id=task_id, live=False)
+        # Check for identical cached file on server before downloading
+        existing_file = find_existing_server_file(clean_name, message_file_size)
+        if existing_file and existing_file.exists():
+            term_log("RECEIVE", f"Identical file found on server disk ({existing_file.name}), skipping download", task_id=task_id)
+            await status_msg.edit("**Identical video found on server cache! Reusing file...**")
+            shutil.copy2(existing_file, save_path)
+            download_time = 0.0
+        else:
+            # Download media natively via Telethon MTProto chunked stream
+            await client.download_media(
+                message,
+                file=str(save_path),
+                progress_callback=download_progress
+            )
+            download_time = round(time.time() - start_time, 1)
+            term_log("DOWNLOAD", f"Download finished in {download_time}s: {clean_name}", task_id=task_id, live=False)
         
         term_log("PROBE", f"Inspecting media streams with FFprobe...", task_id=task_id)
         await updater.update("**Analyzing video streams with FFprobe...**", force=True)

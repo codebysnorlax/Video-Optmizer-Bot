@@ -20,12 +20,11 @@ def build_main_menu(task_id: str) -> List[List[Button]]:
 
 
 def build_optimize_menu(task_id: str) -> List[List[Button]]:
-    """Builds the 4 optimization sub-options menu."""
+    """Builds the 3 optimization sub-options menu."""
     return [
         [Button.inline("1. Low Device (Max Compatibility)", data=f"opt_run:low:{task_id}".encode())],
         [Button.inline("2. Moderate (Mid-Range Device)", data=f"opt_run:mod:{task_id}".encode())],
         [Button.inline("3. Auto Recommended (Smart Fix)", data=f"opt_run:auto:{task_id}".encode())],
-        [Button.inline("4. Auto + Best Quality + Fix Size", data=f"opt_run:best:{task_id}".encode())],
         [Button.inline("< Back to Main Menu", data=f"main_menu:{task_id}".encode())]
     ]
 
@@ -62,6 +61,9 @@ def build_cleanup_original_menu(task_id: str) -> List[List[Button]]:
         [
             Button.inline("Delete Original File", data=f"del_orig:{task_id}".encode()),
             Button.inline("Keep Original File", data=f"keep_orig:{task_id}".encode())
+        ],
+        [
+            Button.inline("Try Another Optimization / Change", data=f"retry_opt:{task_id}".encode())
         ]
     ]
 
@@ -72,6 +74,9 @@ def build_cleanup_output_menu(task_id: str) -> List[List[Button]]:
         [
             Button.inline("Delete Processed File", data=f"del_opt:{task_id}".encode()),
             Button.inline("Keep Processed File", data=f"keep_opt:{task_id}".encode())
+        ],
+        [
+            Button.inline("Try Another Optimization / Change", data=f"retry_opt:{task_id}".encode())
         ]
     ]
 
