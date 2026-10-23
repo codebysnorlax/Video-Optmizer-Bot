@@ -608,7 +608,30 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
 
             # Transcode completed
             out_size = os.path.getsize(out_path) if out_path.exists() else 0
-            
+
+            # Absolute Failsafe: An optimizer must NEVER deliver an output larger than the input!
+            if out_size >= meta.file_size_bytes:
+                term_log("PROCESS", f"Output ({format_bytes(out_size)}) was >= input ({format_bytes(meta.file_size_bytes)}). Protecting user by keeping original stream.", task_id=task_id)
+                fallback_out = settings.OUTPUT_DIR / f"{task_id}_opt_fast_{task_ctx.input_path.name}"
+                cmd_fallback = [
+                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    "-i", str(task_ctx.input_path),
+                    "-c", "copy",
+                    "-movflags", "+faststart",
+                    str(fallback_out)
+                ]
+                proc = await asyncio.create_subprocess_exec(*cmd_fallback)
+                await proc.wait()
+                if fallback_out.exists():
+                    try:
+                        out_path.unlink()
+                    except Exception:
+                        pass
+                    out_path = fallback_out
+                    task_ctx.output_path = out_path
+                    out_size = os.path.getsize(out_path)
+                    explanation = " • Original video was already at maximum compression.\n • Preserved original pristine stream with FastStart enabled for instant streaming."
+
             # Register in file cache
             await register_file_cache(
                 task_id=task_id,

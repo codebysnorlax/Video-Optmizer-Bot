@@ -57,6 +57,37 @@ async def test_optimizer_modes(sample_media: Path, tmp_path: Path):
     assert "-movflags" in best_cmd
     assert "+faststart" in best_cmd
 
+    # Test 5: 4K video handling ensures libx264 with maxrate under source bitrate
+    from core.probe import MediaMetadata
+    meta_4k = MediaMetadata(
+        file_path=sample_media,
+        file_name="4k_sample.mp4",
+        file_size_bytes=8000000,
+        duration_seconds=10.0,
+        container_format="mp4",
+        has_video=True,
+        video_codec="hevc",
+        width=2160,
+        height=3840,
+        fps=60.0,
+        video_bitrate_kbps=5800,
+        has_audio=True,
+        audio_codec="aac",
+        audio_channels=2,
+        audio_sample_rate=44100,
+        audio_bitrate_kbps=128,
+        overall_bitrate_kbps=5900,
+        is_high_bitrate=False,
+        raw_info={}
+    )
+    cmd_4k, exp_4k = VideoOptimizer.build_best_quality_args(meta_4k, out_file, current_hardware)
+    assert "libx264" in cmd_4k
+    assert "-maxrate" in cmd_4k
+    idx = cmd_4k.index("-maxrate")
+    rate_val = int(cmd_4k[idx + 1].replace("k", ""))
+    # Guarantee maxrate is strictly less than source bitrate (5800)
+    assert rate_val < 5800
+
 
 @pytest.mark.asyncio
 async def test_converter_modes(sample_media: Path, tmp_path: Path):

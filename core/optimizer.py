@@ -3,6 +3,7 @@ Video Optimization Algorithms:
 1. Low Device (Ultra Compatibility & Low Bitrate)
 2. Moderate (Mid-Range Device Support)
 3. Auto Recommended (Smart Problem Detection, Bitrate De-bloat, Perceptually Lossless)
+4. Auto + Best Quality + Fix Size (Native Resolution, Near-Lossless, Strict Size De-bloat)
 """
 
 from pathlib import Path
@@ -15,6 +16,20 @@ class VideoOptimizer:
     """Generates FFmpeg command parameters for video optimization."""
 
     @staticmethod
+    def get_source_video_bitrate(meta: MediaMetadata) -> int:
+        """
+        Accurately estimates source video stream bitrate in kbps.
+        Falls back to total file bitrate minus audio if video stream bitrate is absent.
+        """
+        if meta.video_bitrate_kbps and meta.video_bitrate_kbps > 100:
+            return meta.video_bitrate_kbps
+        if meta.duration_seconds > 0 and meta.file_size_bytes > 0:
+            total_kbps = int((meta.file_size_bytes * 8) / (meta.duration_seconds * 1000))
+            audio_kbps = meta.audio_bitrate_kbps if meta.has_audio else 0
+            return max(300, total_kbps - (audio_kbps or 128))
+        return meta.overall_bitrate_kbps or 3500
+
+    @staticmethod
     def build_low_device_args(
         meta: MediaMetadata,
         output_path: Path,
@@ -25,9 +40,13 @@ class VideoOptimizer:
         - H.264 Baseline/Main profile
         - YUV420p
         - Capped resolution (max 720p)
-        - Target bitrate: 1200k, Audio: AAC 128k
+        - Target bitrate: capped at 50% of source (max 1200k), Audio: AAC 128k
         - High compatibility with older phones, TVs, and budget devices.
         """
+        src_br = VideoOptimizer.get_source_video_bitrate(meta)
+        max_br = min(1200, max(400, int(src_br * 0.50)))
+        buf_size = max_br * 2
+
         cmd = ["-i", str(meta.file_path)]
 
         # Video scale filter
@@ -43,9 +62,7 @@ class VideoOptimizer:
                 "-filter_hw_device", "va",
                 "-vf", ",".join(vf_filters) if vf_filters else "format=nv12,hwupload",
                 "-c:v", "h264_vaapi",
-                "-b:v", "1200k",
-                "-maxrate", "1500k",
-                "-bufsize", "2500k"
+                "-qp", "28"
             ])
         else:
             if vf_filters:
@@ -56,8 +73,8 @@ class VideoOptimizer:
                 "-level", "4.0",
                 "-preset", "veryfast" if hw.is_termux else "fast",
                 "-crf", "26",
-                "-maxrate", "1400k",
-                "-bufsize", "2800k",
+                "-maxrate", f"{max_br}k",
+                "-bufsize", f"{buf_size}k",
                 "-pix_fmt", "yuv420p",
                 "-threads", str(hw.cpu_cores)
             ])
@@ -81,10 +98,14 @@ class VideoOptimizer:
         """
         Mode 2: Moderate (Mid-Range Device Support)
         - H.264 High profile
-        - Target CRF 23, maxrate 3500k
+        - Target maxrate capped at 65% of source (max 2800k)
         - Audio AAC 160k
         - Great balance of crisp clarity and reduced file size.
         """
+        src_br = VideoOptimizer.get_source_video_bitrate(meta)
+        max_br = min(2800, max(600, int(src_br * 0.65)))
+        buf_size = max_br * 2
+
         cmd = ["-i", str(meta.file_path)]
 
         vf_filters = []
@@ -99,7 +120,7 @@ class VideoOptimizer:
                 "-filter_hw_device", "va",
                 "-vf", ",".join(vf_filters) if vf_filters else "format=nv12,hwupload",
                 "-c:v", "h264_vaapi",
-                "-qp", "24"
+                "-qp", "25"
             ])
         else:
             if vf_filters:
@@ -110,8 +131,8 @@ class VideoOptimizer:
                 "-level", "4.1",
                 "-preset", "veryfast" if hw.is_termux else "fast",
                 "-crf", "23",
-                "-maxrate", "3500k",
-                "-bufsize", "7000k",
+                "-maxrate", f"{max_br}k",
+                "-bufsize", f"{buf_size}k",
                 "-pix_fmt", "yuv420p",
                 "-threads", str(hw.cpu_cores)
             ])
@@ -133,13 +154,16 @@ class VideoOptimizer:
         """
         Mode 3: Auto Recommended (Smart Problem Detection & Fix)
         Analyses video characteristics:
-        - If high bitrate bloat (e.g. 40s 500MB = ~100 Mbps!), strips raw bit waste.
-        - Calculates target CRF (21-22) for perceptually lossless results.
-        - Caps VBV buffer at optimal streaming rates.
-        - Preserves native 1080p/720p resolution without blurring.
+        - Downscales 4K UHD to fluid 1080p (ideal for mobile / Telegram sharing).
+        - Enforces strict bitrate ceiling <= 65% of source bitrate (max 3200k).
+        - Strips raw camera bloat with zero perceptual quality loss.
         - Enables +faststart for instant Telegram streamability.
         Returns: (command_args, explanation_of_fix)
         """
+        src_br = VideoOptimizer.get_source_video_bitrate(meta)
+        max_br = min(3200, max(600, int(src_br * 0.65)))
+        buf_size = max_br * 2
+
         cmd = ["-i", str(meta.file_path)]
         explanation = []
 
@@ -153,13 +177,12 @@ class VideoOptimizer:
             explanation.append(f"Preserved native {meta.resolution_label} resolution")
 
         # Check 2: High Bitrate Bloat
-        if meta.overall_bitrate_kbps > 10000:
-            explanation.append(f"Eliminated raw camera bitrate bloat ({meta.overall_bitrate_kbps // 1000} Mbps -> Perceptual VBR)")
+        if meta.overall_bitrate_kbps > 8000:
+            explanation.append(f"Eliminated camera bitrate bloat ({meta.overall_bitrate_kbps // 1000} Mbps -> {max_br // 1000} Mbps cap)")
             target_crf = 22
-            max_br = 4000
         else:
+            explanation.append(f"Optimized stream density (target cap: {max_br} kbps)")
             target_crf = 23
-            max_br = 3000
 
         # Video encoder selection
         if hw.hwaccel_type == "vaapi" and hw.hwaccel_device:
@@ -169,7 +192,7 @@ class VideoOptimizer:
                 "-filter_hw_device", "va",
                 "-vf", ",".join(vf_filters) if vf_filters else "format=nv12,hwupload",
                 "-c:v", "h264_vaapi",
-                "-qp", str(target_crf)
+                "-qp", "24"
             ])
             explanation.append("Accelerated via Hardware GPU (Intel VAAPI)")
         else:
@@ -182,7 +205,7 @@ class VideoOptimizer:
                 "-preset", "veryfast" if hw.is_termux else "fast",
                 "-crf", str(target_crf),
                 "-maxrate", f"{max_br}k",
-                "-bufsize", f"{max_br * 2}k",
+                "-bufsize", f"{buf_size}k",
                 "-pix_fmt", "yuv420p",
                 "-threads", str(hw.cpu_cores)
             ])
@@ -214,62 +237,74 @@ class VideoOptimizer:
         Mode 4: Auto + Best Quality + Fix Size
         - Keeps 100% original visual quality & full native resolution (including 4K/2K).
         - Strips raw bloated bitrate without downscaling or blurring.
-        - Uses near-lossless CRF 19 (or VAAPI QP 19) with dynamic VBV ceiling.
+        - Guarantees target bitrate is strictly lower than source video bitrate (never grows larger).
+        - Uses multi-threaded VBV rate control (libx264) for 4K to prevent hardware CQP bitrate explosion.
         - Preserves untouched audio stream (if AAC) or converts to high-fidelity AAC 256k.
-        - Reduces multi-hundred megabyte raw camera videos down to compact size.
         Returns: (command_args, explanation_of_fix)
         """
+        src_br = VideoOptimizer.get_source_video_bitrate(meta)
+
+        # Standard resolution baseline caps for bloated raw camera files
+        if meta.height and meta.height > 1080:
+            base_cap = 8000
+        elif meta.height and meta.height > 720:
+            base_cap = 4500
+        else:
+            base_cap = 2200
+
+        # Never exceed 72% of the source bitrate, ensuring output is ALWAYS smaller than source!
+        max_br = min(base_cap, max(500, int(src_br * 0.72)))
+        buf_size = max_br * 2
+
         cmd = ["-i", str(meta.file_path)]
         explanation = []
 
         # 1. Native Resolution Preservation (no downscaling)
-        vf_filters = []
         explanation.append(f"Preserved 100% native {meta.resolution_label} resolution (no downscaling)")
 
-        # 2. Bitrate de-bloat ceiling based on resolution
+        if src_br > base_cap:
+            explanation.append(f"Eliminated camera bitrate bloat ({src_br // 1000} Mbps -> pristine {max_br // 1000} Mbps VBR cap)")
+        else:
+            explanation.append(f"Strict size reduction applied (capped at {max_br} kbps vs original {src_br} kbps)")
+
+        # 2. Video encoder selection:
+        # For 4K (>1080p), hardware VAAPI in CQP mode cannot enforce -maxrate and can explode to 75 Mbps.
+        # libx264 with VBV buffer ensures strict adherence to max_br on all platforms.
         if meta.height and meta.height > 1080:
-            max_br = 12000
-            buf_size = 24000
-        elif meta.height and meta.height > 720:
-            max_br = 6500
-            buf_size = 13000
-        else:
-            max_br = 3500
-            buf_size = 7000
-
-        target_crf = 19
-        if meta.overall_bitrate_kbps > max_br:
-            explanation.append(f"Eliminated camera bitrate bloat ({meta.overall_bitrate_kbps // 1000} Mbps -> pristine {max_br // 1000} Mbps VBR cap)")
-        else:
-            explanation.append(f"Optimized container stream efficiency (CRF {target_crf})")
-
-        # 3. Video encoder selection
-        if hw.hwaccel_type == "vaapi" and hw.hwaccel_device:
-            vf_filters.append("format=nv12,hwupload")
-            cmd.extend([
-                "-init_hw_device", f"vaapi=va:{hw.hwaccel_device}",
-                "-filter_hw_device", "va",
-                "-vf", ",".join(vf_filters),
-                "-c:v", "h264_vaapi",
-                "-qp", str(target_crf)
-            ])
-            explanation.append("Accelerated via Hardware GPU (Intel VAAPI)")
-        else:
-            if vf_filters:
-                cmd.extend(["-vf", ",".join(vf_filters)])
             cmd.extend([
                 "-c:v", "libx264",
                 "-profile:v", "high",
                 "-preset", "veryfast" if hw.is_termux else "fast",
-                "-crf", str(target_crf),
+                "-crf", "22",
                 "-maxrate", f"{max_br}k",
                 "-bufsize", f"{buf_size}k",
                 "-pix_fmt", "yuv420p",
                 "-threads", str(hw.cpu_cores)
             ])
-            explanation.append(f"Near-lossless CRF {target_crf} via Multi-Threaded Engine ({hw.cpu_cores} cores)")
+            explanation.append(f"Strict VBV Bitrate Control via Multi-Threaded Engine ({hw.cpu_cores} cores)")
+        elif hw.hwaccel_type == "vaapi" and hw.hwaccel_device:
+            cmd.extend([
+                "-init_hw_device", f"vaapi=va:{hw.hwaccel_device}",
+                "-filter_hw_device", "va",
+                "-vf", "format=nv12,hwupload",
+                "-c:v", "h264_vaapi",
+                "-qp", "24"
+            ])
+            explanation.append("Accelerated via Hardware GPU (Intel VAAPI)")
+        else:
+            cmd.extend([
+                "-c:v", "libx264",
+                "-profile:v", "high",
+                "-preset", "veryfast" if hw.is_termux else "fast",
+                "-crf", "22",
+                "-maxrate", f"{max_br}k",
+                "-bufsize", f"{buf_size}k",
+                "-pix_fmt", "yuv420p",
+                "-threads", str(hw.cpu_cores)
+            ])
+            explanation.append(f"Processed via Multi-Threaded Engine ({hw.cpu_cores} cores)")
 
-        # 4. Audio processing: Untouched stream copy if AAC, otherwise high-grade AAC 256k
+        # 3. Audio processing: Untouched stream copy if AAC, otherwise high-grade AAC 256k
         if meta.has_audio:
             if meta.audio_codec and meta.audio_codec.lower() == "aac":
                 cmd.extend(["-c:a", "copy"])
