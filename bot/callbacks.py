@@ -32,7 +32,12 @@ from bot.keyboards import (
     build_cleanup_original_menu,
     build_cleanup_output_menu
 )
-from bot.progress import ThrottledMessageUpdater, format_progress_status, make_progress_bar
+from bot.progress import (
+    ThrottledMessageUpdater,
+    format_progress_status,
+    make_progress_bar,
+    format_time_breakdown
+)
 from bot.task_manager import task_manager
 
 logger = logging.getLogger(__name__)
@@ -277,6 +282,7 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 await updater.update(text)
 
             term_log("PROCESS", f"Starting FFmpeg transcode pipeline ({mode_label})", task_id=task_id)
+            t_transcode_start = time.time()
             # Run FFmpeg transcode with 0.2s interval for smooth terminal rendering
             await run_ffmpeg_with_progress(
                 cmd=cmd,
@@ -284,10 +290,10 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 progress_callback=transcode_progress,
                 progress_interval=0.2
             )
-            term_log("PROCESS", f"Transcode finished ({mode_label})", task_id=task_id, live=False)
+            transcode_time = round(time.time() - t_transcode_start, 1)
+            term_log("PROCESS", f"Transcode finished ({mode_label}) in {transcode_time}s", task_id=task_id, live=False)
 
             # Transcode completed
-            elapsed_time = round(time.time() - start_exec, 1)
             out_size = os.path.getsize(out_path) if out_path.exists() else 0
             
             # Register in file cache
@@ -334,26 +340,66 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 f"*File:* `{meta.file_name}`\n"
                 f"*Duration:* `{format_duration(meta.duration_seconds)}`\n"
                 f"*Original:* `{format_bytes(meta.file_size_bytes)}` -> *Optimized:* `{format_bytes(out_size)}`\n"
-                f"*Status:* `{reduction_str}`\n"
-                f"*Processing Time:* `{elapsed_time}s`\n"
+                f"*Status:* `{reduction_str}`\n\n"
+                f"*Time Details:*\n"
+                f"• Receive & Download: `{task_ctx.download_time:.1f}s`\n"
+                f"• Media Analysis: `{task_ctx.probe_time:.1f}s`\n"
+                f"• Transcode / Processing: `{transcode_time:.1f}s`\n"
+                f"• Upload to Telegram: `Finalizing...`\n\n"
                 f"*Engine:* `{current_hardware.description}`"
             )
             if explanation:
                 caption += f"\n\n*Fixes Applied:*\n{explanation}"
 
             # Send video file to user
-            await client.send_file(
+            sent_msg = await client.send_file(
                 entity=user_id,
                 file=str(out_path),
                 caption=caption,
                 supports_streaming=True,
                 progress_callback=upload_progress
             )
-            term_log("UPLOAD", f"Upload finished", task_id=task_id, live=False)
+            upload_time = round(time.time() - upload_start, 1)
+            term_log("UPLOAD", f"Upload finished in {upload_time}s", task_id=task_id, live=False)
+
+            total_pipeline_time = round(task_ctx.download_time + task_ctx.probe_time + transcode_time + upload_time, 1)
+            total_overall_time = round(time.time() - task_ctx.t_received, 1) if task_ctx.t_received > 0 else total_pipeline_time
+
+            # Format full time breakdown
+            time_breakdown_str = format_time_breakdown(
+                download_time=task_ctx.download_time,
+                probe_time=task_ctx.probe_time,
+                transcode_time=transcode_time,
+                upload_time=upload_time,
+                total_pipeline_time=total_pipeline_time,
+                total_overall_time=total_overall_time
+            )
+
+            # Update delivered message caption with precise upload & total time
+            final_caption = (
+                f"*{mode_label} Complete!*\n\n"
+                f"*File:* `{meta.file_name}`\n"
+                f"*Duration:* `{format_duration(meta.duration_seconds)}`\n"
+                f"*Original:* `{format_bytes(meta.file_size_bytes)}` -> *Optimized:* `{format_bytes(out_size)}`\n"
+                f"*Status:* `{reduction_str}`\n\n"
+                f"{time_breakdown_str}\n\n"
+                f"*Engine:* `{current_hardware.description}`"
+            )
+            if explanation:
+                final_caption += f"\n\n*Fixes Applied:*\n{explanation}"
+
+            try:
+                await sent_msg.edit(final_caption)
+            except Exception as e:
+                logger.debug(f"Caption edit error on sent message: {e}")
 
             # Record completion in DB
-            await record_task_complete(task_id, out_size, elapsed_time)
-            term_log("DONE", f"Delivered to user! Output: {format_bytes(out_size)} | {reduction_str} in {elapsed_time}s", task_id=task_id)
+            await record_task_complete(task_id, out_size, total_pipeline_time)
+            term_log(
+                "DONE",
+                f"Delivered to user! Output: {format_bytes(out_size)} | {reduction_str} | Total: {total_pipeline_time}s (Overall: {total_overall_time}s) [Down: {task_ctx.download_time}s, Probe: {task_ctx.probe_time}s, Transcode: {transcode_time}s, Up: {upload_time}s]",
+                task_id=task_id
+            )
 
             # Prompt user for disk cleanup (Step 1 of 2: Original file)
             disk = settings.get_disk_usage()
@@ -361,6 +407,7 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
             orig_size_str = format_bytes(meta.file_size_bytes)
             cleanup_prompt = (
                 "*Video Delivered Successfully!*\n\n"
+                f"{time_breakdown_str}\n\n"
                 "Step 1 of 2: Original File Cleanup\n"
                 f"• Original Source File: `{orig_name}` ({orig_size_str})\n"
                 f"• Server Free Space: `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
@@ -425,15 +472,16 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                 await updater.update(text)
 
             # Run FFmpeg transcode
+            t_transcode_start = time.time()
             await run_ffmpeg_with_progress(
                 cmd=cmd,
                 total_duration_seconds=meta.duration_seconds,
                 progress_callback=transcode_progress,
                 progress_interval=0.2
             )
-            term_log("PROCESS", f"Transcode finished ({target_fmt.upper()})", task_id=task_id, live=False)
+            transcode_time = round(time.time() - t_transcode_start, 1)
+            term_log("PROCESS", f"Transcode finished ({target_fmt.upper()}) in {transcode_time}s", task_id=task_id, live=False)
 
-            elapsed_time = round(time.time() - start_exec, 1)
             out_size = os.path.getsize(out_path) if out_path.exists() else 0
 
             # Register in file cache
@@ -466,14 +514,18 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
             caption = (
                 f"*Conversion to {target_fmt.upper()} Complete!*\n\n"
                 f"*File:* `{meta.file_name}`\n"
-                f"*Output Size:* `{format_bytes(out_size)}`\n"
-                f"*Processing Time:* `{elapsed_time}s`\n"
+                f"*Output Size:* `{format_bytes(out_size)}`\n\n"
+                f"*Time Details:*\n"
+                f"• Receive & Download: `{task_ctx.download_time:.1f}s`\n"
+                f"• Media Analysis: `{task_ctx.probe_time:.1f}s`\n"
+                f"• Transcode / Processing: `{transcode_time:.1f}s`\n"
+                f"• Upload to Telegram: `Finalizing...`\n\n"
                 f"*Engine:* `{current_hardware.description}`"
             )
 
             # Send file or audio
             if is_audio:
-                await client.send_file(
+                sent_msg = await client.send_file(
                     entity=user_id,
                     file=str(out_path),
                     caption=caption,
@@ -481,25 +533,57 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                     progress_callback=upload_progress
                 )
             else:
-                await client.send_file(
+                sent_msg = await client.send_file(
                     entity=user_id,
                     file=str(out_path),
                     caption=caption,
                     supports_streaming=True,
                     progress_callback=upload_progress
                 )
-            term_log("UPLOAD", f"Upload finished", task_id=task_id, live=False)
+            upload_time = round(time.time() - upload_start, 1)
+            term_log("UPLOAD", f"Upload finished in {upload_time}s", task_id=task_id, live=False)
+
+            total_pipeline_time = round(task_ctx.download_time + task_ctx.probe_time + transcode_time + upload_time, 1)
+            total_overall_time = round(time.time() - task_ctx.t_received, 1) if task_ctx.t_received > 0 else total_pipeline_time
+
+            # Format full time breakdown
+            time_breakdown_str = format_time_breakdown(
+                download_time=task_ctx.download_time,
+                probe_time=task_ctx.probe_time,
+                transcode_time=transcode_time,
+                upload_time=upload_time,
+                total_pipeline_time=total_pipeline_time,
+                total_overall_time=total_overall_time
+            )
+
+            # Update delivered message caption with precise upload & total time
+            final_caption = (
+                f"*Conversion to {target_fmt.upper()} Complete!*\n\n"
+                f"*File:* `{meta.file_name}`\n"
+                f"*Output Size:* `{format_bytes(out_size)}`\n\n"
+                f"{time_breakdown_str}\n\n"
+                f"*Engine:* `{current_hardware.description}`"
+            )
+            try:
+                await sent_msg.edit(final_caption)
+            except Exception as e:
+                logger.debug(f"Caption edit error on sent message: {e}")
 
             # Record completion in DB
-            await record_task_complete(task_id, out_size, elapsed_time)
-            term_log("DONE", f"Delivered {target_fmt.upper()} to user! Size: {format_bytes(out_size)} in {elapsed_time}s", task_id=task_id)
+            await record_task_complete(task_id, out_size, total_pipeline_time)
+            term_log(
+                "DONE",
+                f"Delivered {target_fmt.upper()} to user! Size: {format_bytes(out_size)} | Total: {total_pipeline_time}s (Overall: {total_overall_time}s) [Down: {task_ctx.download_time}s, Probe: {task_ctx.probe_time}s, Transcode: {transcode_time}s, Up: {upload_time}s]",
+                task_id=task_id
+            )
 
             # Prompt user for disk cleanup (Step 1 of 2: Original file)
             disk = settings.get_disk_usage()
             orig_name = Path(task_ctx.input_path).name
             orig_size_str = format_bytes(meta.file_size_bytes)
             cleanup_prompt = (
-                "*Delivered Successfully!*\n\n"
+                f"*{target_fmt.upper()} Delivered Successfully!*\n\n"
+                f"{time_breakdown_str}\n\n"
                 "Step 1 of 2: Original File Cleanup\n"
                 f"• Original Source File: `{orig_name}` ({orig_size_str})\n"
                 f"• Server Free Space: `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"

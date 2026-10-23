@@ -92,14 +92,17 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
             file=str(save_path),
             progress_callback=download_progress
         )
-        term_log("DOWNLOAD", f"Download finished: {clean_name}", task_id=task_id, live=False)
+        download_time = round(time.time() - start_time, 1)
+        term_log("DOWNLOAD", f"Download finished in {download_time}s: {clean_name}", task_id=task_id, live=False)
         
         term_log("PROBE", f"Inspecting media streams with FFprobe...", task_id=task_id)
         await updater.update("*Analyzing video streams with FFprobe...*", force=True)
 
         # Probe video
+        probe_start = time.time()
         meta = await probe_media(save_path)
-        term_log("PROBE", f"Analyzed: {meta.resolution_label} | {meta.duration_seconds:.1f}s | {meta.video_codec} | {meta.overall_bitrate_kbps} kbps", task_id=task_id)
+        probe_time = round(time.time() - probe_start, 1)
+        term_log("PROBE", f"Analyzed in {probe_time}s: {meta.resolution_label} | {meta.duration_seconds:.1f}s | {meta.video_codec} | {meta.overall_bitrate_kbps} kbps", task_id=task_id)
 
         # Build analysis card and main menu
         summary_text = meta.get_summary_card(hardware_summary=current_hardware.description)
@@ -113,7 +116,10 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
             output_path=None,
             meta=meta,
             status_message=status_msg,
-            original_message_id=message.id
+            original_message_id=message.id,
+            t_received=start_time,
+            download_time=download_time,
+            probe_time=probe_time
         )
         task_manager.register_task(task_ctx)
 

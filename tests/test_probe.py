@@ -54,3 +54,23 @@ def test_format_helpers():
     assert format_duration(45) == "00:45"
     assert format_duration(125) == "02:05"
     assert format_duration(3665) == "01:01:05"
+
+
+def test_format_time_breakdown():
+    from bot.progress import format_time_breakdown
+    res = format_time_breakdown(
+        download_time=4.2,
+        probe_time=0.3,
+        transcode_time=11.5,
+        upload_time=5.1,
+        total_pipeline_time=21.1,
+        total_overall_time=32.6
+    )
+    assert "*Time Details:*" in res
+    assert "Receive & Download: `4.2s`" in res
+    assert "Media Analysis: `0.3s`" in res
+    assert "Transcode / Processing: `11.5s`" in res
+    assert "Upload to Telegram: `5.1s`" in res
+    assert "Total Active Pipeline: `21.1s`" in res
+    assert "Total Overall Time: `32.6s`" in res
+

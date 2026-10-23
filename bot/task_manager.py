@@ -19,6 +19,9 @@ class TaskContext:
     meta: MediaMetadata
     status_message: any
     original_message_id: int
+    t_received: float = 0.0
+    download_time: float = 0.0
+    probe_time: float = 0.0
 
 
 class TaskManager:
