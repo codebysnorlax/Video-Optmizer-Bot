@@ -52,11 +52,21 @@ def build_convert_menu(task_id: str) -> List[List[Button]]:
     ]
 
 
-def build_retention_menu(task_id: str) -> List[List[Button]]:
-    """Builds server disk cleanup prompt buttons after delivery."""
+def build_cleanup_original_menu(task_id: str) -> List[List[Button]]:
+    """Builds Step 1 menu: Delete or Keep the Original source file."""
     return [
         [
-            Button.inline("Delete from Server", data=f"del_srv:{task_id}".encode()),
-            Button.inline("Keep in Server Cache", data=f"keep_srv:{task_id}".encode())
+            Button.inline("Delete Original File", data=f"del_orig:{task_id}".encode()),
+            Button.inline("Keep Original File", data=f"keep_orig:{task_id}".encode())
+        ]
+    ]
+
+
+def build_cleanup_output_menu(task_id: str) -> List[List[Button]]:
+    """Builds Step 2 menu: Delete or Keep the Processed/Optimized file."""
+    return [
+        [
+            Button.inline("Delete Processed File", data=f"del_opt:{task_id}".encode()),
+            Button.inline("Keep Processed File", data=f"keep_opt:{task_id}".encode())
         ]
     ]

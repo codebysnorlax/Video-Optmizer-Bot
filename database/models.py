@@ -81,8 +81,8 @@ async def register_file_cache(task_id: str, user_id: int, input_path: str, outpu
     """Registers input and output file paths on server for storage tracking."""
     async with aiosqlite.connect(settings.DB_PATH) as db:
         await db.execute("""
-            INSERT OR REPLACE INTO file_cache (task_id, user_id, input_path, output_path, deleted)
-            VALUES (?, ?, ?, ?, 0)
+            INSERT OR REPLACE INTO file_cache (task_id, user_id, input_path, output_path, input_deleted, output_deleted, deleted)
+            VALUES (?, ?, ?, ?, 0, 0, 0)
         """, (task_id, user_id, input_path, output_path))
         await db.commit()
 
@@ -98,10 +98,24 @@ async def get_file_cache(task_id: str) -> Optional[Dict[str, Any]]:
     return None
 
 
-async def mark_file_cache_deleted(task_id: str) -> None:
-    """Marks file cache entry as deleted."""
+async def mark_input_file_deleted(task_id: str) -> None:
+    """Marks input original file as deleted."""
     async with aiosqlite.connect(settings.DB_PATH) as db:
-        await db.execute("UPDATE file_cache SET deleted = 1 WHERE task_id = ?", (task_id,))
+        await db.execute("UPDATE file_cache SET input_deleted = 1 WHERE task_id = ?", (task_id,))
+        await db.commit()
+
+
+async def mark_output_file_deleted(task_id: str) -> None:
+    """Marks output processed file as deleted."""
+    async with aiosqlite.connect(settings.DB_PATH) as db:
+        await db.execute("UPDATE file_cache SET output_deleted = 1, deleted = 1 WHERE task_id = ?", (task_id,))
+        await db.commit()
+
+
+async def mark_file_cache_deleted(task_id: str) -> None:
+    """Marks both file cache entries as deleted."""
+    async with aiosqlite.connect(settings.DB_PATH) as db:
+        await db.execute("UPDATE file_cache SET input_deleted = 1, output_deleted = 1, deleted = 1 WHERE task_id = ?", (task_id,))
         await db.commit()
 
 

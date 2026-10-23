@@ -45,15 +45,24 @@ async def test_database_crud(tmp_path: Path, monkeypatch):
         elapsed_time=3.5
     )
 
-    # File cache
+    # File cache separate deletion tests
     await register_file_cache(task_id, user_id, "/tmp/in.mp4", "/tmp/out.mp4")
     cache = await get_file_cache(task_id)
     assert cache is not None
     assert cache["input_path"] == "/tmp/in.mp4"
+    assert cache["input_deleted"] == 0
+    assert cache["output_deleted"] == 0
 
-    await mark_file_cache_deleted(task_id)
-    cache_updated = await get_file_cache(task_id)
-    assert cache_updated["deleted"] == 1
+    from database.models import mark_input_file_deleted, mark_output_file_deleted
+    await mark_input_file_deleted(task_id)
+    cache_in_del = await get_file_cache(task_id)
+    assert cache_in_del["input_deleted"] == 1
+    assert cache_in_del["output_deleted"] == 0
+
+    await mark_output_file_deleted(task_id)
+    cache_out_del = await get_file_cache(task_id)
+    assert cache_out_del["output_deleted"] == 1
+    assert cache_out_del["deleted"] == 1
 
     # Stats
     stats = await get_user_stats(user_id)

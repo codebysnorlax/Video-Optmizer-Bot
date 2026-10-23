@@ -45,17 +45,27 @@ async def init_db() -> None:
             )
         """)
 
-        # File cache table (keeps track of server files to prompt user for deletion)
+        # File cache table (keeps track of server files to prompt user for separate deletion)
         await db.execute("""
             CREATE TABLE IF NOT EXISTS file_cache (
                 task_id TEXT PRIMARY KEY,
                 user_id INTEGER,
                 input_path TEXT,
                 output_path TEXT,
+                input_deleted INTEGER DEFAULT 0,
+                output_deleted INTEGER DEFAULT 0,
                 deleted INTEGER DEFAULT 0,
                 created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         """)
+
+        # Backward compatibility column check
+        async with db.execute("PRAGMA table_info(file_cache)") as cursor:
+            cols = [row[1] for row in await cursor.fetchall()]
+            if "input_deleted" not in cols:
+                await db.execute("ALTER TABLE file_cache ADD COLUMN input_deleted INTEGER DEFAULT 0")
+            if "output_deleted" not in cols:
+                await db.execute("ALTER TABLE file_cache ADD COLUMN output_deleted INTEGER DEFAULT 0")
 
         await db.commit()
     logger.info(f"Database initialized successfully at {db_path}")

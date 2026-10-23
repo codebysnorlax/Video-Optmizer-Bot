@@ -21,13 +21,16 @@ from database.models import (
     record_task_failed,
     register_file_cache,
     get_file_cache,
+    mark_input_file_deleted,
+    mark_output_file_deleted,
     mark_file_cache_deleted
 )
 from bot.keyboards import (
     build_main_menu,
     build_optimize_menu,
     build_convert_menu,
-    build_retention_menu
+    build_cleanup_original_menu,
+    build_cleanup_output_menu
 )
 from bot.progress import ThrottledMessageUpdater, format_progress_status, make_progress_bar
 from bot.task_manager import task_manager
@@ -91,43 +94,95 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         await event.edit(text, buttons=menu)
         return
 
-    # 5. Server File Retention Callbacks
-    if action_type == "del_srv":
+    # 5. Server File Retention Callbacks (Step 1: Original File)
+    if action_type in ("del_orig", "keep_orig"):
         task_id = parts[1]
         cache = await get_file_cache(task_id)
-        deleted_count = 0
-        if cache:
-            for p_str in [cache.get("input_path"), cache.get("output_path")]:
-                if p_str and os.path.exists(p_str):
-                    try:
-                        os.remove(p_str)
-                        deleted_count += 1
-                    except Exception as e:
-                        logger.error(f"Failed to delete {p_str}: {e}")
-            await mark_file_cache_deleted(task_id)
-        
-        task_manager.remove_task(task_id)
-        disk_info = settings.get_disk_usage()
-        term_log("STORAGE", f"Deleted local temporary files for task {task_id}", task_id=task_id, extra=f"{disk_info['free_gb']} GB free")
-        await event.edit(
-            "*Server storage cleaned!*\n\n"
-            "Deleted temporary source & output files from server.\n"
-            f"*Updated Server Free Space:* `{disk_info['free_gb']} GB free / {disk_info['total_gb']} GB total`"
+        if not cache:
+            await event.answer("Session expired or cache not found.", alert=True)
+            return
+
+        in_path = cache.get("input_path")
+        orig_name = Path(in_path).name if in_path else "original_video"
+
+        if action_type == "del_orig":
+            if in_path and os.path.exists(in_path):
+                try:
+                    os.remove(in_path)
+                except Exception as e:
+                    logger.error(f"Failed to delete original {in_path}: {e}")
+            await mark_input_file_deleted(task_id)
+            term_log("STORAGE", f"Deleted original file {orig_name}", task_id=task_id)
+            orig_status = "Deleted from server"
+            alert_msg = "Original file deleted from server."
+        else:
+            term_log("STORAGE", f"Kept original file {orig_name}", task_id=task_id)
+            orig_status = "Kept in server cache"
+            alert_msg = "Original file kept in server cache."
+
+        # Advance to Step 2: Optimized/Processed file deletion
+        disk = settings.get_disk_usage()
+        out_path = cache.get("output_path")
+        opt_name = Path(out_path).name if out_path else "processed_video"
+        opt_size = os.path.getsize(out_path) if out_path and os.path.exists(out_path) else 0
+        opt_size_str = format_bytes(opt_size)
+
+        step2_text = (
+            f"Step 1 of 2 Complete:\n"
+            f"• Original File: `{orig_name}` ({orig_status})\n\n"
+            "Step 2 of 2: Processed File Cleanup\n"
+            f"• Processed File: `{opt_name}` ({opt_size_str})\n"
+            f"• Server Free Space: `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
+            "Would you like to delete the processed file from the server now?"
         )
-        await event.answer("Files deleted from server!", alert=False)
+        await event.edit(step2_text, buttons=build_cleanup_output_menu(task_id))
+        await event.answer(alert_msg, alert=False)
         return
 
-    if action_type == "keep_srv":
+    # 5b. Server File Retention Callbacks (Step 2: Optimized/Processed File)
+    if action_type in ("del_opt", "keep_opt"):
         task_id = parts[1]
+        cache = await get_file_cache(task_id)
+        if not cache:
+            await event.answer("Session expired or cache not found.", alert=True)
+            return
+
+        out_path = cache.get("output_path")
+        opt_name = Path(out_path).name if out_path else "processed_video"
+
+        if action_type == "del_opt":
+            if out_path and os.path.exists(out_path):
+                try:
+                    os.remove(out_path)
+                except Exception as e:
+                    logger.error(f"Failed to delete processed {out_path}: {e}")
+            await mark_output_file_deleted(task_id)
+            term_log("STORAGE", f"Deleted processed file {opt_name}", task_id=task_id)
+            opt_status = "Deleted from server"
+            alert_msg = "Processed file deleted from server."
+        else:
+            term_log("STORAGE", f"Kept processed file {opt_name}", task_id=task_id)
+            opt_status = "Kept in server cache"
+            alert_msg = "Processed file kept in server cache."
+
+        # Fetch updated cache to reflect original file status
+        updated_cache = await get_file_cache(task_id) or cache
+        orig_deleted = updated_cache.get("input_deleted", 0) == 1
+        orig_name = Path(cache.get("input_path", "")).name
+        orig_status = "Deleted from server" if orig_deleted else "Kept in server cache"
+
         task_manager.remove_task(task_id)
-        disk_info = settings.get_disk_usage()
-        term_log("STORAGE", f"Retained files in server cache for task {task_id}", task_id=task_id)
-        await event.edit(
-            "*File retained in server cache.*\n\n"
-            f"*Current Server Free Space:* `{disk_info['free_gb']} GB free / {disk_info['total_gb']} GB total`\n"
-            "You can manage server storage anytime."
+        disk = settings.get_disk_usage()
+
+        final_text = (
+            "Server Storage Cleanup Complete:\n\n"
+            f"• Original File: `{orig_name}` -> {orig_status}\n"
+            f"• Processed File: `{opt_name}` -> {opt_status}\n\n"
+            f"Current Server Free Space: `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
+            "All set! Ready for your next video."
         )
-        await event.answer("Saved in server cache.", alert=False)
+        await event.edit(final_text)
+        await event.answer(alert_msg, alert=False)
         return
 
     # 6. Execute Optimization Job
@@ -290,15 +345,18 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
             await record_task_complete(task_id, out_size, elapsed_time)
             term_log("DONE", f"Delivered to user! Saved {format_bytes(saved_bytes)} ({ratio:.1f}%) in {elapsed_time}s", task_id=task_id)
 
-            # Prompt user for disk cleanup
+            # Prompt user for disk cleanup (Step 1 of 2: Original file)
             disk = settings.get_disk_usage()
+            orig_name = Path(task_ctx.input_path).name
+            orig_size_str = format_bytes(meta.file_size_bytes)
             cleanup_prompt = (
                 "*Video Delivered Successfully!*\n\n"
-                "*Server Storage Status:*\n"
-                f"• Free Disk Space: `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
-                "Would you like to delete the server copy now to free up space on your host?"
+                "Step 1 of 2: Original File Cleanup\n"
+                f"• Original Source File: `{orig_name}` ({orig_size_str})\n"
+                f"• Server Free Space: `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
+                "Would you like to delete the original source file from the server now?"
             )
-            await status_msg.edit(cleanup_prompt, buttons=build_retention_menu(task_id))
+            await status_msg.edit(cleanup_prompt, buttons=build_cleanup_original_menu(task_id))
 
         except Exception as e:
             logger.error(f"Optimization error for task {task_id}: {e}", exc_info=True)
@@ -424,15 +482,18 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
             await record_task_complete(task_id, out_size, elapsed_time)
             term_log("DONE", f"Delivered {target_fmt.upper()} to user! Size: {format_bytes(out_size)} in {elapsed_time}s", task_id=task_id)
 
-            # Prompt user for disk cleanup
+            # Prompt user for disk cleanup (Step 1 of 2: Original file)
             disk = settings.get_disk_usage()
+            orig_name = Path(task_ctx.input_path).name
+            orig_size_str = format_bytes(meta.file_size_bytes)
             cleanup_prompt = (
                 "*Delivered Successfully!*\n\n"
-                "*Server Storage Status:*\n"
-                f"• Free Disk Space: `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
-                "Would you like to delete the server copy now to free up space on your host?"
+                "Step 1 of 2: Original File Cleanup\n"
+                f"• Original Source File: `{orig_name}` ({orig_size_str})\n"
+                f"• Server Free Space: `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
+                "Would you like to delete the original source file from the server now?"
             )
-            await status_msg.edit(cleanup_prompt, buttons=build_retention_menu(task_id))
+            await status_msg.edit(cleanup_prompt, buttons=build_cleanup_original_menu(task_id))
 
         except Exception as e:
             logger.error(f"Conversion error for task {task_id}: {e}", exc_info=True)
