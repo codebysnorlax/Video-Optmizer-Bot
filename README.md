@@ -197,3 +197,4 @@ Run the test suite anytime:
 | `/hardware` | Live host diagnostics: CPU cores, RAM, GPU/VAAPI status, and disk space |
 | `/stats` | User metrics: total processed videos, total bandwidth saved, and host storage |
 | `/history` | Recent 5 tasks with compression ratios |
+| `/storage` | Live server disk usage and active temporary file cache stats |

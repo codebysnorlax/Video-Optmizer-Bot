@@ -61,6 +61,11 @@ async def main() -> None:
     await client.start(bot_token=settings.BOT_TOKEN)
     me = await client.get_me()
     logger.info(f"Bot successfully authenticated as @{me.username} (ID: {me.id})")
+
+    # Register Telegram native command menu in chat input box
+    from bot.client import register_bot_menu_commands
+    await register_bot_menu_commands(client)
+
     print(f"\n{BOLD_GREEN}>>> Bot is online and listening for videos as @{me.username} <<<{RESET}\n", flush=True)
 
     # 5. Run bot loop until disconnected

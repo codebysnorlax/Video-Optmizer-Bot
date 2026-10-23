@@ -115,3 +115,21 @@ async def handle_history(event: events.NewMessage.Event) -> None:
             f"   • Size: `{format_bytes(t['input_size'])}` -> `{format_bytes(t['output_size'])}`"
         )
     await event.reply("\n".join(lines))
+
+
+async def handle_storage(event: events.NewMessage.Event) -> None:
+    """Handles /storage command."""
+    disk = settings.get_disk_usage()
+    dl_size = sum(f.stat().st_size for f in settings.DOWNLOAD_DIR.glob("*") if f.is_file())
+    out_size = sum(f.stat().st_size for f in settings.OUTPUT_DIR.glob("*") if f.is_file())
+    text = (
+        "*Server Storage Diagnostics*\n\n"
+        f"*Free Space:* `{disk['free_gb']} GB free`\n"
+        f"*Total Space:* `{disk['total_gb']} GB total`\n"
+        f"*Used Space:* `{disk['used_gb']} GB` ({disk['percent_used']}% used)\n\n"
+        f"*Active Temporary Cache:*\n"
+        f"• Downloads folder: `{format_bytes(dl_size)}`\n"
+        f"• Outputs folder: `{format_bytes(out_size)}`\n\n"
+        "Storage is automatically managed with step-by-step deletion prompts after each video."
+    )
+    await event.reply(text)

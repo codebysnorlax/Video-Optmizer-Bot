@@ -3,13 +3,41 @@ Telethon MTProto Client Initialization & Event Dispatcher
 """
 
 import logging
-from telethon import TelegramClient, events
+from telethon import TelegramClient, events, functions, types
 from config.settings import settings
-from bot.handlers import handle_start, handle_help, handle_hardware, handle_stats, handle_history
+from bot.handlers import (
+    handle_start,
+    handle_help,
+    handle_hardware,
+    handle_stats,
+    handle_history,
+    handle_storage
+)
 from bot.media_handler import handle_incoming_media, is_video_message
 from bot.callbacks import handle_callback_query
 
 logger = logging.getLogger(__name__)
+
+
+async def register_bot_menu_commands(client: TelegramClient) -> None:
+    """Registers official Telegram Bot menu commands for auto-complete in chat input."""
+    commands = [
+        types.BotCommand(command="start", description="Start the bot and view instructions"),
+        types.BotCommand(command="help", description="How to optimize and convert videos"),
+        types.BotCommand(command="hardware", description="View CPU/GPU hardware acceleration info"),
+        types.BotCommand(command="stats", description="View total bandwidth saved & task count"),
+        types.BotCommand(command="history", description="View your recent processing tasks"),
+        types.BotCommand(command="storage", description="Check host disk space & active cache")
+    ]
+    try:
+        await client(functions.bots.SetBotCommandsRequest(
+            scope=types.BotCommandScopeDefault(),
+            lang_code="",
+            commands=commands
+        ))
+        logger.info("Telegram input box command menu registered successfully.")
+    except Exception as e:
+        logger.warning(f"Could not register Telegram bot menu commands: {e}")
 
 
 def create_bot_client() -> TelegramClient:
@@ -42,6 +70,10 @@ def create_bot_client() -> TelegramClient:
     @client.on(events.NewMessage(pattern=r"^/history$"))
     async def _history(event):
         await handle_history(event)
+
+    @client.on(events.NewMessage(pattern=r"^/storage$"))
+    async def _storage(event):
+        await handle_storage(event)
 
     # Register Incoming Media Listener
     @client.on(events.NewMessage())
