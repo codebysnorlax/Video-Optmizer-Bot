@@ -232,7 +232,8 @@ class VideoOptimizer:
     def build_auto_recommended_args(
         meta: MediaMetadata,
         output_path: Path,
-        hw: HardwareProfile = current_hardware
+        hw: HardwareProfile = current_hardware,
+        bitrate_mode: str = "same"
     ) -> Tuple[List[str], str]:
         """
         Mode 3: Auto Recommended (Smart Problem Detection & Universal Phone Playability)
@@ -240,7 +241,9 @@ class VideoOptimizer:
           1. Resolution: Downscales heavy >1080p (4K/2K) to crisp 1080p FHD cap (eliminates 75% decoding strain and mobile lag).
              NEVER upscales <=1080p (720p, 480p, 420p strictly stay native).
           2. Framerate: Caps >60fps at 60fps for smooth hardware decoding without frame drops.
-          3. Bitrate & Quality: Optimizes stream density for butter-smooth mobile playback without quality degradation.
+          3. Bitrate & Quality:
+             - "same": Preserves original high bitrate stream density (~95%, capped at 20 Mbps) for maximum detail.
+             - "less": Compresses bitrate (~50-55% of source, max 3500 kbps) for significantly reduced file size.
           4. Hardware: Uses Intel VAAPI GPU acceleration for fastest hardware encoding.
           5. FastStart: Enables +faststart for instant streaming buffer.
         Returns: (command_args, explanation_of_fix)
@@ -268,7 +271,7 @@ class VideoOptimizer:
             and is_moderate_bitrate
         )
 
-        if is_already_mobile_fit:
+        if bitrate_mode == "same" and is_already_mobile_fit:
             # Video is already <=1080p, <=60fps, compatible container/codec and moderate bitrate
             cmd = ["-i", str(meta.file_path), "-c:v", "copy"]
             explanation.append(f"Preserved native {meta.resolution_label} resolution (never upscaled, already lightweight & smooth for mobile screens)")
@@ -304,25 +307,31 @@ class VideoOptimizer:
         elif meta.fps:
             explanation.append(f"Preserved native framerate ({meta.fps:.0f} fps for fluid motion)")
 
-        # Bitrate Policy for 1080p:
-        # 1. If source bitrate > 20 Mbps (e.g. 30-80 Mbps bloated camera video):
-        #    Reduce to around 19 to 20 Mbps (20,000 kbps) for master-grade crisp detail.
-        # 2. If source bitrate <= 20 Mbps:
-        #    Do not reduce bitrate drastically — keep high bitrate (~95% of source bitrate)
-        #    so 1080p looks ultra-detailed and sharp with 4x pixel density.
-        max_mobile_ceiling = 20000  # 20 Mbps (20,000 kbps)
-        if src_br > max_mobile_ceiling:
-            target_br = max_mobile_ceiling
-            explanation.append(f"Reduced very high camera bitrate ({src_br // 1000} Mbps -> 20 Mbps master quality for ultra-detailed, smooth 1080p)")
+        # Bitrate Policy:
+        if bitrate_mode == "less":
+            # Compresses bitrate to deliver noticeably smaller file size while keeping good mobile quality
+            target_br = max(300, min(3500, int(src_br * 0.55)))
+            explanation.append(f"Compressed stream bitrate ({src_br} kbps -> {target_br} kbps) for reduced file size & lighter storage")
+            if target_br >= 3000:
+                vaapi_qp = 35
+            elif target_br >= 2000:
+                vaapi_qp = 37
+            elif target_br >= 1200:
+                vaapi_qp = 39
+            else:
+                vaapi_qp = 40
+            target_crf = 24
         else:
-            target_br = max(200, int(src_br * 0.95))
-            explanation.append(f"Preserved high bitrate stream density ({src_br} kbps -> {target_br} kbps) for maximum 1080p detail")
-
-        if hw.hwaccel_type == "vaapi" and hw.hwaccel_device:
-            cmd = ["-init_hw_device", f"vaapi=va:{hw.hwaccel_device}", "-filter_hw_device", "va", "-i", str(meta.file_path)]
-            filters = [f for f in [scale_f, fps_f, "format=nv12", "hwupload"] if f]
-            if filters:
-                cmd.extend(["-vf", ",".join(filters)])
+            # "same" / Best Quality Mode:
+            # 1. If source bitrate > 20 Mbps: reduce to 19-20 Mbps master quality
+            # 2. If source bitrate <= 20 Mbps: retain high bitrate (~95%) for maximum 1080p detail
+            max_mobile_ceiling = 20000  # 20 Mbps
+            if src_br > max_mobile_ceiling:
+                target_br = max_mobile_ceiling
+                explanation.append(f"Reduced very high camera bitrate ({src_br // 1000} Mbps -> 20 Mbps master quality for ultra-detailed, smooth 1080p)")
+            else:
+                target_br = max(200, int(src_br * 0.95))
+                explanation.append(f"Preserved high bitrate stream density ({src_br} kbps -> {target_br} kbps) for maximum 1080p detail")
 
             # Map target bitrate to optimal VAAPI CQP for 1080p:
             if target_br >= 18000:
@@ -343,6 +352,13 @@ class VideoOptimizer:
                 vaapi_qp = 36  # ~2.5 Mbps
             else:
                 vaapi_qp = 38
+            target_crf = 17 if target_br >= 18000 else (19 if target_br >= 5000 else 21)
+
+        if hw.hwaccel_type == "vaapi" and hw.hwaccel_device:
+            cmd = ["-init_hw_device", f"vaapi=va:{hw.hwaccel_device}", "-filter_hw_device", "va", "-i", str(meta.file_path)]
+            filters = [f for f in [scale_f, fps_f, "format=nv12", "hwupload"] if f]
+            if filters:
+                cmd.extend(["-vf", ",".join(filters)])
 
             cmd.extend([
                 "-c:v", "h264_vaapi",
@@ -354,7 +370,6 @@ class VideoOptimizer:
             filters = [f for f in [scale_f, fps_f, "format=yuv420p"] if f]
             if filters:
                 cmd.extend(["-vf", ",".join(filters)])
-            target_crf = 17 if target_br >= 18000 else (19 if target_br >= 5000 else 21)
             cmd.extend([
                 "-c:v", "libx264",
                 "-profile:v", "high",
@@ -369,7 +384,11 @@ class VideoOptimizer:
             explanation.append(f"Processed via Multi-Threaded Engine ({hw.cpu_cores} cores)")
 
         if meta.has_audio:
-            if is_mobile_acodec and is_stereo_or_mono:
+            if bitrate_mode == "less":
+                audio_br = min(128, meta.audio_bitrate_kbps or 128)
+                cmd.extend(["-c:a", "aac", "-b:a", f"{audio_br}k", "-ac", "2"])
+                explanation.append(f"Compressed audio to efficient mobile stereo AAC ({audio_br}k)")
+            elif is_mobile_acodec and is_stereo_or_mono:
                 cmd.extend(["-c:a", "copy"])
                 explanation.append("Preserved original untouched AAC audio stream (lossless copy)")
             else:

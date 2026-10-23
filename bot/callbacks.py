@@ -36,6 +36,7 @@ from database.models import (
 from bot.keyboards import (
     build_main_menu,
     build_optimize_menu,
+    build_auto_recommended_menu,
     build_convert_menu,
     build_cleanup_original_menu,
     build_cleanup_output_menu,
@@ -141,6 +142,25 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             "**1. Low Device (Max Compatibility):** Downscales >720p to 720p (never upscales <=720p), caps >60fps at 60fps (never upsamples), moderates high bitrates for older & budget phones.\n"
             "**2. Moderate (Mid-Range Device):** Downscales >1080p to 1080p (never upscales <=1080p), caps >60fps at 60fps, optimizes bitrate for smooth mid-range smartphone playback.\n"
             "**3. Auto Recommended (Smart Fix):** Universal smartphone compatibility, downscales >1080p to 1080p (never upscales), fixes audio issues, strictly reduces file size."
+        )
+        await event.edit(text, buttons=menu)
+        return
+
+    # 3b. Auto Recommended Bitrate Preference Menu
+    if action_type == "opt_auto_menu":
+        task_id = parts[1]
+        task_ctx = await get_or_restore_task_ctx(task_id, event)
+        if not task_ctx:
+            await event.answer("Session expired or file was deleted.", alert=True)
+            return
+        menu = build_auto_recommended_menu(task_id)
+        text = (
+            "**Auto Recommended — Bitrate Preference:**\n\n"
+            "Choose how you want to optimize your video for smartphone playback:\n\n"
+            "• **1. Keep Same Bitrate (Best Quality):**\n"
+            "Caps resolution at 1080p FHD (never upscaled) for universal mobile compatibility, while preserving original high bitrate stream density (up to 20 Mbps) for maximum clarity and detail.\n\n"
+            "• **2. Lesser Bitrate (Smaller File Size):**\n"
+            "Caps resolution at 1080p FHD and compresses the bitrate to deliver a significantly smaller file size while keeping high visual quality for mobile storage and data saving."
         )
         await event.edit(text, buttons=menu)
         return
@@ -293,6 +313,21 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         if not task_ctx:
             await event.answer("Session expired or file was deleted.", alert=True)
             return
+
+        # If sub_mode is 'auto', prompt user with the bitrate preference options
+        if sub_mode == "auto":
+            menu = build_auto_recommended_menu(task_id)
+            text = (
+                "**Auto Recommended — Bitrate Preference:**\n\n"
+                "Choose how you want to optimize your video for smartphone playback:\n\n"
+                "• **1. Keep Same Bitrate (Best Quality):**\n"
+                "Caps resolution at 1080p FHD (never upscaled) for universal mobile compatibility, while preserving original high bitrate stream density (up to 20 Mbps) for maximum clarity and detail.\n\n"
+                "• **2. Lesser Bitrate (Smaller File Size):**\n"
+                "Caps resolution at 1080p FHD and compresses the bitrate to deliver a significantly smaller file size while keeping high visual quality for mobile storage and data saving."
+            )
+            await event.edit(text, buttons=menu)
+            return
+
         if task_ctx.is_processing:
             await event.answer("Processing is already in progress. Please wait...", alert=True)
             return
@@ -304,7 +339,12 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         except Exception:
             pass
 
-        mode_names = {"low": "Low Device", "mod": "Moderate", "auto": "Auto Recommended"}
+        mode_names = {
+            "low": "Low Device",
+            "mod": "Moderate",
+            "auto_same": "Auto (Keep Same Bitrate)",
+            "auto_less": "Auto (Lesser Bitrate)"
+        }
         mode_label = mode_names.get(sub_mode, "Optimization")
         # Remove buttons immediately so user cannot click options while processing is running
         await event.edit(f"**Queued for {mode_label}...**\nWaiting for processing slot...", buttons=None)
@@ -648,7 +688,9 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
     mode_names = {
         "low": "Low Device Optimize",
         "mod": "Moderate Optimize",
-        "auto": "Auto Recommended"
+        "auto": "Auto Recommended",
+        "auto_same": "Auto (Keep Same Bitrate)",
+        "auto_less": "Auto (Lesser Bitrate)"
     }
     mode_label = mode_names.get(mode, "Optimization")
     
@@ -679,8 +721,10 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 cmd, explanation = VideoOptimizer.build_low_device_args(meta, out_path, current_hardware)
             elif mode == "mod":
                 cmd, explanation = VideoOptimizer.build_moderate_args(meta, out_path, current_hardware)
+            elif mode == "auto_less":
+                cmd, explanation = VideoOptimizer.build_auto_recommended_args(meta, out_path, current_hardware, bitrate_mode="less")
             else:
-                cmd, explanation = VideoOptimizer.build_auto_recommended_args(meta, out_path, current_hardware)
+                cmd, explanation = VideoOptimizer.build_auto_recommended_args(meta, out_path, current_hardware, bitrate_mode="same")
 
             active_engine_str = current_hardware.description if "-c:v" in cmd and "h264_vaapi" in cmd else (
                 "Pristine Stream (FastStart)" if "-c:v" in cmd and "copy" in cmd else f"CPU Multi-Thread ({current_hardware.cpu_cores} cores)"

@@ -24,8 +24,17 @@ def build_optimize_menu(task_id: str) -> List[List[Button]]:
     return [
         [Button.inline("1. Low Device (Max Compatibility)", data=f"opt_run:low:{task_id}".encode())],
         [Button.inline("2. Moderate (Mid-Range Device)", data=f"opt_run:mod:{task_id}".encode())],
-        [Button.inline("3. Auto Recommended (Smart Fix)", data=f"opt_run:auto:{task_id}".encode())],
+        [Button.inline("3. Auto Recommended (Smart Fix)", data=f"opt_auto_menu:{task_id}".encode())],
         [Button.inline("< Back to Main Menu", data=f"main_menu:{task_id}".encode())]
+    ]
+
+
+def build_auto_recommended_menu(task_id: str) -> List[List[Button]]:
+    """Builds the sub-options menu for Auto Recommended bitrate preference."""
+    return [
+        [Button.inline("1. Keep Same Bitrate (Best Quality)", data=f"opt_run:auto_same:{task_id}".encode())],
+        [Button.inline("2. Lesser Bitrate (Smaller File Size)", data=f"opt_run:auto_less:{task_id}".encode())],
+        [Button.inline("< Back to Optimize Menu", data=f"opt_menu:{task_id}".encode())]
     ]
 
 

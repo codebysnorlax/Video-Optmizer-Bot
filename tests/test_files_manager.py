@@ -45,8 +45,15 @@ def test_optimize_menu():
     assert len(menu) == 4  # 3 options + back button
     assert b"opt_run:low:task_abc" in menu[0][0].type.data
     assert b"opt_run:mod:task_abc" in menu[1][0].type.data
-    assert b"opt_run:auto:task_abc" in menu[2][0].type.data
+    assert b"opt_auto_menu:task_abc" in menu[2][0].type.data
     assert b"main_menu:task_abc" in menu[3][0].type.data
+
+    from bot.keyboards import build_auto_recommended_menu
+    auto_menu = build_auto_recommended_menu("task_abc")
+    assert len(auto_menu) == 3
+    assert b"opt_run:auto_same:task_abc" in auto_menu[0][0].type.data
+    assert b"opt_run:auto_less:task_abc" in auto_menu[1][0].type.data
+    assert b"opt_menu:task_abc" in auto_menu[2][0].type.data
 
     from bot.keyboards import build_cleanup_original_menu, build_cleanup_output_menu
     clean_orig = build_cleanup_original_menu("task_abc")

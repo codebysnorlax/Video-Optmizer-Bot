@@ -413,4 +413,43 @@ def test_auto_recommended_bitrate_policy():
     assert "5700k" in cmd_6
     assert "Preserved high bitrate stream density" in exp_6
 
+    # 3. Mode 'less': Compresses bitrate for noticeably smaller file size
+    cmd_less, exp_less = VideoOptimizer.build_auto_recommended_args(meta_6mbps, out_file, cpu_hw, bitrate_mode="less")
+    assert "-maxrate" in cmd_less
+    # 6000 * 0.55 = 3300
+    assert "3300k" in cmd_less
+    assert "-crf" in cmd_less
+    assert cmd_less[cmd_less.index("-crf") + 1] == "24"
+    assert "Compressed stream bitrate" in exp_less
+
+    # 4. Mode 'less' on already mobile-fit 1080p: must still compress rather than copy
+    meta_1080p_fit = MediaMetadata(
+        file_path=Path("/tmp/fake_1080p.mp4"),
+        file_name="web_1080p.mp4",
+        file_size_bytes=6000000,
+        duration_seconds=10.0,
+        container_format="mp4",
+        has_video=True,
+        video_codec="h264",
+        width=1920,
+        height=1080,
+        fps=30.0,
+        video_bitrate_kbps=6000,
+        has_audio=True,
+        audio_codec="aac",
+        audio_channels=2,
+        audio_sample_rate=44100,
+        audio_bitrate_kbps=128,
+        overall_bitrate_kbps=6000,
+        is_high_bitrate=False,
+        raw_info={}
+    )
+    cmd_fit_same, _ = VideoOptimizer.build_auto_recommended_args(meta_1080p_fit, out_file, cpu_hw, bitrate_mode="same")
+    assert "copy" in cmd_fit_same  # 'same' does fast lossless copy
+
+    cmd_fit_less, exp_fit_less = VideoOptimizer.build_auto_recommended_args(meta_1080p_fit, out_file, cpu_hw, bitrate_mode="less")
+    assert "copy" not in cmd_fit_less  # 'less' re-encodes to reduce file size
+    assert "-maxrate" in cmd_fit_less
+    assert "3300k" in cmd_fit_less
+
 
