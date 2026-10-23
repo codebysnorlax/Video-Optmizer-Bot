@@ -211,12 +211,12 @@ class VideoOptimizer:
         hw: HardwareProfile = current_hardware
     ) -> Tuple[List[str], str]:
         """
-        Mode 4: Auto + Best Quality + Fix MB
+        Mode 4: Auto + Best Quality + Fix Size
         - Keeps 100% original visual quality & full native resolution (including 4K/2K).
         - Strips raw bloated bitrate without downscaling or blurring.
         - Uses near-lossless CRF 19 (or VAAPI QP 19) with dynamic VBV ceiling.
         - Preserves untouched audio stream (if AAC) or converts to high-fidelity AAC 256k.
-        - Reduces multi-hundred megabyte raw camera videos down to compact MB.
+        - Reduces multi-hundred megabyte raw camera videos down to compact size.
         Returns: (command_args, explanation_of_fix)
         """
         cmd = ["-i", str(meta.file_path)]
