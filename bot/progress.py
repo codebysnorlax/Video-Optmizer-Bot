@@ -75,7 +75,7 @@ def format_progress_status(
 
     return (
         f"{action_label}\n"
-        f"📊 {bar}\n"
-        f"📦 {cur_mb:.1f} MB / {tot_mb:.1f} MB\n"
-        f"⚡ Speed: {speed_mb:.1f} MB/s | ⏱ ETA: {eta}s"
+        f"Progress: {bar}\n"
+        f"Size: {cur_mb:.1f} MB / {tot_mb:.1f} MB\n"
+        f"Speed: {speed_mb:.1f} MB/s | ETA: {eta}s"
     )

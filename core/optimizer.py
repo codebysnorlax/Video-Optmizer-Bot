@@ -154,7 +154,7 @@ class VideoOptimizer:
 
         # Check 2: High Bitrate Bloat
         if meta.overall_bitrate_kbps > 10000:
-            explanation.append(f"Eliminated raw camera bitrate bloat ({meta.overall_bitrate_kbps // 1000} Mbps ➡️ Perceptual VBR)")
+            explanation.append(f"Eliminated raw camera bitrate bloat ({meta.overall_bitrate_kbps // 1000} Mbps -> Perceptual VBR)")
             target_crf = 22
             max_br = 4000
         else:

@@ -59,13 +59,13 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
 
     save_path = settings.DOWNLOAD_DIR / f"{task_id}_{clean_name}"
 
-    status_msg = await event.reply("📥 *Receiving video from Telegram...*\nConnecting to stream...")
+    status_msg = await event.reply("*Receiving video from Telegram...*\nConnecting to stream...")
     updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
     start_time = time.time()
 
     async def download_progress(current_bytes: int, total_bytes: int):
         text = format_progress_status(
-            action_label="📥 *Downloading Video from Telegram:*",
+            action_label="*Downloading Video from Telegram:*",
             current_bytes=current_bytes,
             total_bytes=total_bytes,
             start_time=start_time
@@ -80,7 +80,7 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
             progress_callback=download_progress
         )
         
-        await updater.update("🔍 *Analyzing video streams with FFprobe...*", force=True)
+        await updater.update("*Analyzing video streams with FFprobe...*", force=True)
 
         # Probe video
         meta = await probe_media(save_path)
@@ -111,4 +111,4 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
                 save_path.unlink()
             except Exception:
                 pass
-        await status_msg.edit(f"❌ *Failed to download or analyze video:*\n`{str(e)}`")
+        await status_msg.edit(f"[ERROR] *Failed to download or analyze video:*\n`{str(e)}`")

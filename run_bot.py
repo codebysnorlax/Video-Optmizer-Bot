@@ -26,17 +26,17 @@ def print_startup_banner() -> None:
     disk = settings.get_disk_usage()
     banner = f"""
 ======================================================================
-🚀 TELEGRAM VIDEO OPTIMIZER & CONVERTER BOT
+TELEGRAM VIDEO OPTIMIZER & CONVERTER BOT
 ======================================================================
-🖥  OS Platform       : {current_hardware.os_name} ({current_hardware.arch})
-📱 Mobile Termux     : {"YES (Android 10 SDM636)" if current_hardware.is_termux else "NO (Standard Linux)"}
-🧠 CPU Specification : {current_hardware.cpu_model} ({current_hardware.cpu_cores} threads)
-📊 Memory Status     : {current_hardware.available_ram_mb} MB available / {current_hardware.total_ram_mb} MB total
-⚙️ Hardware Accel    : {current_hardware.description}
-🎞 Primary Encoder   : {current_hardware.video_encoder}
-💾 Host Disk Space   : {disk['free_gb']} GB free / {disk['total_gb']} GB total ({disk['percent_used']}% used)
-📁 Storage Temp Dirs : {settings.DOWNLOAD_DIR}
-🗄️ Database Location : {settings.DB_PATH}
+OS Platform       : {current_hardware.os_name} ({current_hardware.arch})
+Mobile Termux     : {"YES (Android 10 SDM636)" if current_hardware.is_termux else "NO (Standard Linux)"}
+CPU Specification : {current_hardware.cpu_model} ({current_hardware.cpu_cores} threads)
+Memory Status     : {current_hardware.available_ram_mb} MB available / {current_hardware.total_ram_mb} MB total
+Hardware Accel    : {current_hardware.description}
+Primary Encoder   : {current_hardware.video_encoder}
+Host Disk Space   : {disk['free_gb']} GB free / {disk['total_gb']} GB total ({disk['percent_used']}% used)
+Storage Temp Dirs : {settings.DOWNLOAD_DIR}
+Database Location : {settings.DB_PATH}
 ======================================================================
 """
     print(banner, flush=True)

@@ -86,13 +86,13 @@ class MediaMetadata:
         # High bitrate alert
         bitrate_note = ""
         if self.is_high_bitrate and self.duration_seconds > 0:
-            bitrate_note = f"\n⚠️ *High Bitrate Bloat:* ~{self.overall_bitrate_kbps // 1000} Mbps (Can be drastically optimized!)"
+            bitrate_note = f"\n[NOTE] *High Bitrate Bloat:* ~{self.overall_bitrate_kbps // 1000} Mbps (Can be drastically optimized)"
 
         card = [
-            f"🎬 *Video Analysis Report*",
-            f"📁 *Name:* `{self.file_name}`",
-            f"📦 *Size:* `{size_str}` {bitrate_note}",
-            f"⏱ *Duration:* `{dur_str}` ({int(self.duration_seconds)}s)",
+            "*Video Analysis Report*",
+            f"*Name:* `{self.file_name}`",
+            f"*Size:* `{size_str}` {bitrate_note}",
+            f"*Duration:* `{dur_str}` ({int(self.duration_seconds)}s)",
         ]
 
         if self.has_video:
@@ -109,21 +109,21 @@ class MediaMetadata:
                 elif c_low == "av1":
                     codec_display = "AV1"
 
-            card.append(f"📐 *Resolution:* `{self.resolution_label}`{fps_str}")
-            card.append(f"🎞 *Video Codec:* `{codec_display}`")
+            card.append(f"*Resolution:* `{self.resolution_label}`{fps_str}")
+            card.append(f"*Video Codec:* `{codec_display}`")
         
         if self.has_audio:
             ch_str = f"{self.audio_channels} ch" if self.audio_channels else "audio"
             sr_str = f"{self.audio_sample_rate}Hz" if self.audio_sample_rate else ""
             br_str = f" | {self.audio_bitrate_kbps} kbps" if self.audio_bitrate_kbps else ""
-            card.append(f"🔊 *Audio:* `{self.audio_codec.upper() if self.audio_codec else 'N/A'}` ({ch_str}, {sr_str}{br_str})")
+            card.append(f"*Audio:* `{self.audio_codec.upper() if self.audio_codec else 'N/A'}` ({ch_str}, {sr_str}{br_str})")
         else:
-            card.append("🔇 *Audio:* `None`")
+            card.append("*Audio:* `None`")
 
         if hardware_summary:
-            card.append(f"⚙️ *Engine:* `{hardware_summary}`")
+            card.append(f"*Engine:* `{hardware_summary}`")
 
-        card.append("\n👉 *Select an action below to proceed:*")
+        card.append("\n*Select an action below to proceed:*")
         return "\n".join(card)
 
 

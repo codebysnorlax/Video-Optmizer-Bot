@@ -42,7 +42,7 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
 
     # 1. AI Manual Notice
     if action_type == "ai_manual":
-        await event.answer("🤖 AI Manual Mode is planned for future updates! Please use Optimize or Convert.", alert=True)
+        await event.answer("AI Manual Mode is planned for future updates! Please use Optimize or Convert.", alert=True)
         return
 
     # 2. Main Menu Navigation
@@ -50,7 +50,7 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         task_id = parts[1]
         task_ctx = task_manager.get_task(task_id)
         if not task_ctx:
-            await event.answer("⚠️ Session expired or file was deleted.", alert=True)
+            await event.answer("Session expired or file was deleted.", alert=True)
             return
         menu = build_main_menu(task_id)
         summary = task_ctx.meta.get_summary_card(current_hardware.description)
@@ -62,14 +62,14 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         task_id = parts[1]
         task_ctx = task_manager.get_task(task_id)
         if not task_ctx:
-            await event.answer("⚠️ Session expired or file was deleted.", alert=True)
+            await event.answer("Session expired or file was deleted.", alert=True)
             return
         menu = build_optimize_menu(task_id)
         text = (
-            "🚀 *Select Optimization Mode:*\n\n"
-            "📱 *1. Low Device:* Max compatibility (H.264 Baseline/Main), lower bitrate for budget/older devices.\n"
-            "💻 *2. Moderate:* Balanced mid-range profile, crisp 1080p/720p clarity.\n"
-            "⚡ *3. Auto Recommended:* Smart analyzer automatically fixes high bitrate bloat (e.g. 500MB camera file) with zero perceptual quality loss."
+            "*Select Optimization Mode:*\n\n"
+            "*1. Low Device:* Max compatibility (H.264 Baseline/Main), lower bitrate for budget/older devices.\n"
+            "*2. Moderate:* Balanced mid-range profile, crisp 1080p/720p clarity.\n"
+            "*3. Auto Recommended:* Smart analyzer automatically fixes high bitrate bloat (e.g. 500MB camera file) with zero perceptual quality loss."
         )
         await event.edit(text, buttons=menu)
         return
@@ -79,11 +79,11 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         task_id = parts[1]
         task_ctx = task_manager.get_task(task_id)
         if not task_ctx:
-            await event.answer("⚠️ Session expired or file was deleted.", alert=True)
+            await event.answer("Session expired or file was deleted.", alert=True)
             return
         menu = build_convert_menu(task_id)
         text = (
-            "🔄 *Select Target Conversion Format:*\n\n"
+            "*Select Target Conversion Format:*\n\n"
             "• Video: `MP4`, `MKV`, `WEBM`, `AVI`, `MOV`, `MPG`\n"
             "• Audio Extraction: `MP3`, `AAC`"
         )
@@ -108,9 +108,9 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         task_manager.remove_task(task_id)
         disk_info = settings.get_disk_usage()
         await event.edit(
-            f"🗑️ *Server storage cleaned!*\n\n"
-            f"Deleted temporary source & output files from server.\n"
-            f"💾 *Updated Server Free Space:* `{disk_info['free_gb']} GB free / {disk_info['total_gb']} GB total`"
+            "*Server storage cleaned!*\n\n"
+            "Deleted temporary source & output files from server.\n"
+            f"*Updated Server Free Space:* `{disk_info['free_gb']} GB free / {disk_info['total_gb']} GB total`"
         )
         await event.answer("Files deleted from server!", alert=False)
         return
@@ -120,9 +120,9 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         task_manager.remove_task(task_id)
         disk_info = settings.get_disk_usage()
         await event.edit(
-            f"📁 *File retained in server cache.*\n\n"
-            f"💾 *Current Server Free Space:* `{disk_info['free_gb']} GB free / {disk_info['total_gb']} GB total`\n"
-            f"You can manage server storage anytime."
+            "*File retained in server cache.*\n\n"
+            f"*Current Server Free Space:* `{disk_info['free_gb']} GB free / {disk_info['total_gb']} GB total`\n"
+            "You can manage server storage anytime."
         )
         await event.answer("Saved in server cache.", alert=False)
         return
@@ -133,7 +133,7 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         task_id = parts[2]
         task_ctx = task_manager.get_task(task_id)
         if not task_ctx:
-            await event.answer("⚠️ Session expired or file was deleted.", alert=True)
+            await event.answer("Session expired or file was deleted.", alert=True)
             return
 
         await event.answer("Starting optimization...")
@@ -146,7 +146,7 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         task_id = parts[2]
         task_ctx = task_manager.get_task(task_id)
         if not task_ctx:
-            await event.answer("⚠️ Session expired or file was deleted.", alert=True)
+            await event.answer("Session expired or file was deleted.", alert=True)
             return
 
         await event.answer(f"Converting to {target_fmt.upper()}...")
@@ -183,7 +183,7 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
     )
 
     updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
-    await updater.update(f"⏳ *Queued for {mode_label}...*\nWaiting for processing slot...", force=True)
+    await updater.update(f"*Queued for {mode_label}...*\nWaiting for processing slot...", force=True)
 
     start_exec = time.time()
 
@@ -202,10 +202,10 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 bar = make_progress_bar(percent)
                 eta_str = f"{eta}s" if eta is not None else "--"
                 text = (
-                    f"⚙️ *{mode_label} in Progress:*\n"
-                    f"📊 {bar}\n"
-                    f"⚡ Speed: `{speed}` | 🎞 FPS: `{fps:.1f}` | ⏱ ETA: `{eta_str}`\n"
-                    f"🛠 Engine: `{current_hardware.description}`"
+                    f"*{mode_label} in Progress:*\n"
+                    f"Progress: {bar}\n"
+                    f"Speed: `{speed}` | FPS: `{fps:.1f}` | ETA: `{eta_str}`\n"
+                    f"Engine: `{current_hardware.description}`"
                 )
                 await updater.update(text)
 
@@ -233,7 +233,7 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
             upload_start = time.time()
             async def upload_progress(current_bytes: int, total_bytes: int):
                 text = format_progress_status(
-                    action_label="📤 *Uploading Optimized Video to Telegram:*",
+                    action_label="*Uploading Optimized Video to Telegram:*",
                     current_bytes=current_bytes,
                     total_bytes=total_bytes,
                     start_time=upload_start
@@ -245,16 +245,16 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
             ratio = (saved_bytes / meta.file_size_bytes * 100) if meta.file_size_bytes > 0 else 0
 
             caption = (
-                f"✅ *{mode_label} Complete!*\n\n"
-                f"📁 *File:* `{meta.file_name}`\n"
-                f"⏱ *Duration:* `{format_duration(meta.duration_seconds)}`\n"
-                f"📦 *Original:* `{format_bytes(meta.file_size_bytes)}` ➡️ *Optimized:* `{format_bytes(out_size)}`\n"
-                f"📉 *Reduction:* `{ratio:.1f}% Saved` ({format_bytes(saved_bytes)})\n"
-                f"⚡ *Processing Time:* `{elapsed_time}s`\n"
-                f"🛠 *Engine:* `{current_hardware.description}`"
+                f"*{mode_label} Complete!*\n\n"
+                f"*File:* `{meta.file_name}`\n"
+                f"*Duration:* `{format_duration(meta.duration_seconds)}`\n"
+                f"*Original:* `{format_bytes(meta.file_size_bytes)}` -> *Optimized:* `{format_bytes(out_size)}`\n"
+                f"*Reduction:* `{ratio:.1f}% Saved` ({format_bytes(saved_bytes)})\n"
+                f"*Processing Time:* `{elapsed_time}s`\n"
+                f"*Engine:* `{current_hardware.description}`"
             )
             if explanation:
-                caption += f"\n\n💡 *Fixes Applied:*\n{explanation}"
+                caption += f"\n\n*Fixes Applied:*\n{explanation}"
 
             # Send video file to user
             await client.send_file(
@@ -271,10 +271,10 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
             # Prompt user for disk cleanup
             disk = settings.get_disk_usage()
             cleanup_prompt = (
-                f"🎉 *Video Delivered Successfully!*\n\n"
-                f"💾 *Server Storage Status:*\n"
+                "*Video Delivered Successfully!*\n\n"
+                "*Server Storage Status:*\n"
                 f"• Free Disk Space: `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
-                f"Would you like to delete the server copy now to free up space on your host?"
+                "Would you like to delete the server copy now to free up space on your host?"
             )
             await status_msg.edit(cleanup_prompt, buttons=build_retention_menu(task_id))
 
@@ -282,7 +282,7 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
             logger.error(f"Optimization error for task {task_id}: {e}", exc_info=True)
             elapsed_time = round(time.time() - start_exec, 1)
             await record_task_failed(task_id, elapsed_time)
-            await status_msg.edit(f"❌ *Optimization Failed:*\n`{str(e)}`")
+            await status_msg.edit(f"[ERROR] *Optimization Failed:*\n`{str(e)}`")
 
 
 async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> None:
@@ -307,7 +307,7 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
     )
 
     updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
-    await updater.update(f"⏳ *Queued for conversion to {target_fmt.upper()}...*\nWaiting for processing slot...", force=True)
+    await updater.update(f"*Queued for conversion to {target_fmt.upper()}...*\nWaiting for processing slot...", force=True)
 
     start_exec = time.time()
 
@@ -319,10 +319,10 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                 bar = make_progress_bar(percent)
                 eta_str = f"{eta}s" if eta is not None else "--"
                 text = (
-                    f"🔄 *Converting to {target_fmt.upper()}:*\n"
-                    f"📊 {bar}\n"
-                    f"⚡ Speed: `{speed}` | ⏱ ETA: `{eta_str}`\n"
-                    f"🛠 Engine: `{current_hardware.description}`"
+                    f"*Converting to {target_fmt.upper()}:*\n"
+                    f"Progress: {bar}\n"
+                    f"Speed: `{speed}` | ETA: `{eta_str}`\n"
+                    f"Engine: `{current_hardware.description}`"
                 )
                 await updater.update(text)
 
@@ -349,7 +349,7 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
             upload_start = time.time()
             async def upload_progress(current_bytes: int, total_bytes: int):
                 text = format_progress_status(
-                    action_label=f"📤 *Uploading {target_fmt.upper()} to Telegram:*",
+                    action_label=f"*Uploading {target_fmt.upper()} to Telegram:*",
                     current_bytes=current_bytes,
                     total_bytes=total_bytes,
                     start_time=upload_start
@@ -357,11 +357,11 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                 await updater.update(text)
 
             caption = (
-                f"✅ *Conversion to {target_fmt.upper()} Complete!*\n\n"
-                f"📁 *File:* `{meta.file_name}`\n"
-                f"📦 *Output Size:* `{format_bytes(out_size)}`\n"
-                f"⚡ *Processing Time:* `{elapsed_time}s`\n"
-                f"🛠 *Engine:* `{current_hardware.description}`"
+                f"*Conversion to {target_fmt.upper()} Complete!*\n\n"
+                f"*File:* `{meta.file_name}`\n"
+                f"*Output Size:* `{format_bytes(out_size)}`\n"
+                f"*Processing Time:* `{elapsed_time}s`\n"
+                f"*Engine:* `{current_hardware.description}`"
             )
 
             # Send file or audio
@@ -388,10 +388,10 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
             # Prompt user for disk cleanup
             disk = settings.get_disk_usage()
             cleanup_prompt = (
-                f"🎉 *Delivered Successfully!*\n\n"
-                f"💾 *Server Storage Status:*\n"
+                "*Delivered Successfully!*\n\n"
+                "*Server Storage Status:*\n"
                 f"• Free Disk Space: `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
-                f"Would you like to delete the server copy now to free up space on your host?"
+                "Would you like to delete the server copy now to free up space on your host?"
             )
             await status_msg.edit(cleanup_prompt, buttons=build_retention_menu(task_id))
 
@@ -399,4 +399,4 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
             logger.error(f"Conversion error for task {task_id}: {e}", exc_info=True)
             elapsed_time = round(time.time() - start_exec, 1)
             await record_task_failed(task_id, elapsed_time)
-            await status_msg.edit(f"❌ *Conversion Failed:*\n`{str(e)}`")
+            await status_msg.edit(f"[ERROR] *Conversion Failed:*\n`{str(e)}`")
