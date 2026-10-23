@@ -304,19 +304,49 @@ class VideoOptimizer:
         elif meta.fps:
             explanation.append(f"Preserved native framerate ({meta.fps:.0f} fps for fluid motion)")
 
-        if meta.overall_bitrate_kbps > 8000:
-            explanation.append(f"Optimized high camera bitrate ({meta.overall_bitrate_kbps // 1000} Mbps -> High Quality Mobile Profile)")
+        # Bitrate Policy for 1080p:
+        # 1. If source bitrate > 20 Mbps (e.g. 30-80 Mbps bloated camera video):
+        #    Reduce to around 19 to 20 Mbps (20,000 kbps) for master-grade crisp detail.
+        # 2. If source bitrate <= 20 Mbps:
+        #    Do not reduce bitrate drastically — keep high bitrate (~95% of source bitrate)
+        #    so 1080p looks ultra-detailed and sharp with 4x pixel density.
+        max_mobile_ceiling = 20000  # 20 Mbps (20,000 kbps)
+        if src_br > max_mobile_ceiling:
+            target_br = max_mobile_ceiling
+            explanation.append(f"Reduced very high camera bitrate ({src_br // 1000} Mbps -> 20 Mbps master quality for ultra-detailed, smooth 1080p)")
         else:
-            explanation.append(f"Optimized stream density for butter-smooth mobile playback ({src_br} kbps cap)")
+            target_br = max(200, int(src_br * 0.95))
+            explanation.append(f"Preserved high bitrate stream density ({src_br} kbps -> {target_br} kbps) for maximum 1080p detail")
 
         if hw.hwaccel_type == "vaapi" and hw.hwaccel_device:
             cmd = ["-init_hw_device", f"vaapi=va:{hw.hwaccel_device}", "-filter_hw_device", "va", "-i", str(meta.file_path)]
             filters = [f for f in [scale_f, fps_f, "format=nv12", "hwupload"] if f]
             if filters:
                 cmd.extend(["-vf", ",".join(filters)])
+
+            # Map target bitrate to optimal VAAPI CQP for 1080p:
+            if target_br >= 18000:
+                vaapi_qp = 22  # ~19-20 Mbps
+            elif target_br >= 13000:
+                vaapi_qp = 24  # ~14 Mbps
+            elif target_br >= 9500:
+                vaapi_qp = 26  # ~10 Mbps
+            elif target_br >= 7000:
+                vaapi_qp = 28  # ~8.5 Mbps
+            elif target_br >= 5800:
+                vaapi_qp = 30  # ~6.5 Mbps
+            elif target_br >= 4500:
+                vaapi_qp = 32  # ~5.6 Mbps
+            elif target_br >= 3000:
+                vaapi_qp = 34  # ~4.0 Mbps
+            elif target_br >= 2000:
+                vaapi_qp = 36  # ~2.5 Mbps
+            else:
+                vaapi_qp = 38
+
             cmd.extend([
                 "-c:v", "h264_vaapi",
-                "-qp", "33"
+                "-qp", str(vaapi_qp)
             ])
             explanation.append(f"Processed via Intel GPU Hardware Acceleration ({hw.hwaccel_device})")
         else:
@@ -324,16 +354,15 @@ class VideoOptimizer:
             filters = [f for f in [scale_f, fps_f, "format=yuv420p"] if f]
             if filters:
                 cmd.extend(["-vf", ",".join(filters)])
-            target_crf = 21
-            target_maxrate = min(5000, max(200, int(src_br * 0.85)))
+            target_crf = 17 if target_br >= 18000 else (19 if target_br >= 5000 else 21)
             cmd.extend([
                 "-c:v", "libx264",
                 "-profile:v", "high",
                 "-level", "4.1",
                 "-preset", "veryfast",
                 "-crf", str(target_crf),
-                "-maxrate", f"{target_maxrate}k",
-                "-bufsize", f"{target_maxrate * 2}k",
+                "-maxrate", f"{target_br}k",
+                "-bufsize", f"{target_br * 2}k",
                 "-pix_fmt", "yuv420p",
                 "-threads", str(hw.cpu_cores)
             ])

@@ -337,3 +337,80 @@ def test_4k_vertical_downscaling():
     assert "-movflags" in cmd_auto
     assert "+faststart" in cmd_auto
 
+
+def test_auto_recommended_bitrate_policy():
+    """Verify Auto Recommended mode caps bloated camera bitrates at 20 Mbps and preserves <= 20 Mbps."""
+    out_file = Path("/tmp/out.mp4")
+    from core.hardware import HardwareProfile
+    cpu_hw = HardwareProfile(
+        os_name="linux",
+        is_termux=False,
+        arch="x86_64",
+        cpu_cores=4,
+        total_ram_mb=8000,
+        available_ram_mb=4000,
+        cpu_model="test_cpu",
+        video_encoder="libx264",
+        hevc_encoder="libx265",
+        hwaccel_type="cpu",
+        hwaccel_device=None,
+        description="CPU Engine"
+    )
+
+    # 1. 50 Mbps raw camera video -> Capped at 20 Mbps
+    meta_50mbps = MediaMetadata(
+        file_path=Path("/tmp/fake_50mbps.mp4"),
+        file_name="cam_4k.mp4",
+        file_size_bytes=50000000,
+        duration_seconds=10.0,
+        container_format="mp4",
+        has_video=True,
+        video_codec="hevc",
+        width=3840,
+        height=2160,
+        fps=60.0,
+        video_bitrate_kbps=50000,
+        has_audio=True,
+        audio_codec="aac",
+        audio_channels=2,
+        audio_sample_rate=48000,
+        audio_bitrate_kbps=256,
+        overall_bitrate_kbps=50000,
+        is_high_bitrate=True,
+        raw_info={}
+    )
+    cmd_50, exp_50 = VideoOptimizer.build_auto_recommended_args(meta_50mbps, out_file, cpu_hw)
+    assert "-maxrate" in cmd_50
+    assert "20000k" in cmd_50
+    assert "-crf" in cmd_50
+    assert cmd_50[cmd_50.index("-crf") + 1] == "17"
+    assert "20 Mbps master quality" in exp_50
+
+    # 2. 4K 6 Mbps video -> Downscaled to 1080p with bitrate preserved at ~95%
+    meta_6mbps = MediaMetadata(
+        file_path=Path("/tmp/fake_6mbps.mp4"),
+        file_name="web_4k.mp4",
+        file_size_bytes=6000000,
+        duration_seconds=10.0,
+        container_format="mp4",
+        has_video=True,
+        video_codec="h264",
+        width=3840,
+        height=2160,
+        fps=30.0,
+        video_bitrate_kbps=6000,
+        has_audio=True,
+        audio_codec="aac",
+        audio_channels=2,
+        audio_sample_rate=44100,
+        audio_bitrate_kbps=128,
+        overall_bitrate_kbps=6000,
+        is_high_bitrate=False,
+        raw_info={}
+    )
+    cmd_6, exp_6 = VideoOptimizer.build_auto_recommended_args(meta_6mbps, out_file, cpu_hw)
+    assert "-maxrate" in cmd_6
+    assert "5700k" in cmd_6
+    assert "Preserved high bitrate stream density" in exp_6
+
+
