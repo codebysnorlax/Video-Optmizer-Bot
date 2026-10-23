@@ -100,3 +100,56 @@ def test_find_existing_server_file(tmp_path, monkeypatch):
     # 3. Nonexistent file
     res_nonexistent = find_existing_server_file("other_video.mp4", 1024)
     assert res_nonexistent is None
+
+
+@pytest.mark.asyncio
+async def test_get_or_restore_task_ctx(tmp_path, monkeypatch):
+    from bot.callbacks import get_or_restore_task_ctx
+    from database.models import register_file_cache
+    from unittest.mock import AsyncMock, MagicMock
+    from config.settings import settings
+
+    monkeypatch.setattr(settings, "DOWNLOAD_DIR", tmp_path)
+    monkeypatch.setattr(settings, "OUTPUT_DIR", tmp_path / "outputs")
+    settings.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    orig_video = tmp_path / "task_xyz_original.mp4"
+    import subprocess
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", "testsrc=duration=1:size=640x360:rate=24",
+        "-f", "lavfi", "-i", "sine=frequency=1000:duration=1",
+        "-c:v", "libx264", "-c:a", "aac",
+        str(orig_video)
+    ]
+    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+
+    opt_video = settings.OUTPUT_DIR / "task_xyz_opt_low.mp4"
+    opt_video.write_bytes(b"dummy_output")
+
+    # Register in DB cache
+    await register_file_cache(
+        task_id="task_xyz",
+        user_id=12345,
+        input_path=str(orig_video),
+        output_path=str(opt_video)
+    )
+
+    # Ensure memory task is clear
+    task_manager.remove_task("task_xyz")
+
+    # Mock callback event
+    mock_event = MagicMock()
+    mock_event.sender_id = 12345
+    mock_event.get_message = AsyncMock(return_value=MagicMock())
+
+    # Call get_or_restore_task_ctx
+    restored_ctx = await get_or_restore_task_ctx("task_xyz", mock_event)
+    assert restored_ctx is not None
+    assert restored_ctx.task_id == "task_xyz"
+    # CRITICAL: input_path must strictly be the original video, NEVER the output
+    assert restored_ctx.input_path == orig_video
+    assert restored_ctx.output_path is None
+    assert restored_ctx.meta.width == 640
+    assert restored_ctx.meta.height == 360
+

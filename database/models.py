@@ -38,6 +38,12 @@ async def record_task_start(
         await db.execute("""
             INSERT INTO tasks (task_id, user_id, file_name, input_size, duration, action, status)
             VALUES (?, ?, ?, ?, ?, ?, 'processing')
+            ON CONFLICT(task_id) DO UPDATE SET
+                action = excluded.action,
+                status = 'processing',
+                output_size = 0,
+                elapsed_time = 0.0,
+                completed_at = NULL
         """, (task_id, user_id, file_name, input_size, duration, action))
         
         # Increment user total tasks

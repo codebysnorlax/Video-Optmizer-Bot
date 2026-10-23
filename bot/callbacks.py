@@ -55,6 +55,56 @@ from bot.task_manager import task_manager, TaskContext, RecallContext
 logger = logging.getLogger(__name__)
 
 
+async def get_or_restore_task_ctx(task_id: str, event: events.CallbackQuery.Event) -> Optional[TaskContext]:
+    """
+    Retrieves active TaskContext, or seamlessly reloads it from the server's original downloaded file cache.
+    Guarantees that input_path always points to the pristine original file (never an optimized output).
+    """
+    task_ctx = task_manager.get_task(task_id)
+    if task_ctx and task_ctx.input_path and task_ctx.input_path.exists():
+        try:
+            task_ctx.status_message = await event.get_message()
+        except Exception:
+            pass
+        return task_ctx
+
+    cache = await get_file_cache(task_id)
+    in_path = None
+    if cache and cache.get("input_path") and (cache.get("input_deleted", 0) == 0):
+        cand = Path(cache["input_path"])
+        if cand.exists():
+            in_path = cand
+
+    if not in_path or not in_path.exists():
+        matches = [p for p in settings.DOWNLOAD_DIR.glob(f"{task_id}_*") if p.is_file()]
+        if matches and matches[0].exists():
+            in_path = matches[0]
+
+    if not in_path or not in_path.exists():
+        return None
+
+    try:
+        meta = await probe_media(in_path)
+        msg = await event.get_message()
+        task_ctx = TaskContext(
+            task_id=task_id,
+            user_id=event.sender_id,
+            input_path=in_path,
+            output_path=None,
+            meta=meta,
+            status_message=msg,
+            original_message_id=0,
+            t_received=time.time(),
+            download_time=0.0,
+            probe_time=0.0
+        )
+        task_manager.register_task(task_ctx)
+        return task_ctx
+    except Exception as e:
+        logger.error(f"Failed to restore task context for {task_id}: {e}")
+        return None
+
+
 async def handle_callback_query(event: events.CallbackQuery.Event, client) -> None:
     """Dispatches button clicks to appropriate workflows."""
     data = event.data.decode(errors="ignore")
@@ -69,7 +119,7 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
     # 2. Main Menu Navigation
     if action_type == "main_menu":
         task_id = parts[1]
-        task_ctx = task_manager.get_task(task_id)
+        task_ctx = await get_or_restore_task_ctx(task_id, event)
         if not task_ctx:
             await event.answer("Session expired or file was deleted.", alert=True)
             return
@@ -81,7 +131,7 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
     # 3. Optimize Menu Sub-options
     if action_type == "opt_menu":
         task_id = parts[1]
-        task_ctx = task_manager.get_task(task_id)
+        task_ctx = await get_or_restore_task_ctx(task_id, event)
         if not task_ctx:
             await event.answer("Session expired or file was deleted.", alert=True)
             return
@@ -98,7 +148,7 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
     # 4. Convert Menu Sub-options
     if action_type == "conv_menu":
         task_id = parts[1]
-        task_ctx = task_manager.get_task(task_id)
+        task_ctx = await get_or_restore_task_ctx(task_id, event)
         if not task_ctx:
             await event.answer("Session expired or file was deleted.", alert=True)
             return
@@ -203,58 +253,45 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         await event.answer(alert_msg, alert=False)
         return
 
-    # 5c. Try Another Optimization / Change with cached file
+    # 5c. Try Another Optimization / Change with cached original file
     if action_type == "retry_opt":
         task_id = parts[1]
-        task_ctx = task_manager.get_task(task_id)
-        cache = await get_file_cache(task_id)
-
-        in_path = None
-        if task_ctx and task_ctx.input_path and task_ctx.input_path.exists():
-            in_path = task_ctx.input_path
-        elif cache and cache.get("input_path") and (cache.get("input_deleted", 0) == 0):
-            cand = Path(cache["input_path"])
-            if cand.exists():
-                in_path = cand
-
-        if not in_path:
+        task_ctx = await get_or_restore_task_ctx(task_id, event)
+        if not task_ctx:
             await event.answer("Original file is no longer available on server. Please send the video again.", alert=True)
             return
 
-        meta = task_ctx.meta if (task_ctx and task_ctx.meta) else await probe_media(in_path)
-        if not task_ctx:
-            task_ctx = TaskContext(
-                task_id=task_id,
-                user_id=event.sender_id,
-                input_path=in_path,
-                output_path=None,
-                meta=meta,
-                status_message=event.message,
-                original_message_id=0,
-                t_received=time.time(),
-                download_time=0.0,
-                probe_time=0.0
-            )
-            task_manager.register_task(task_ctx)
-        else:
-            task_ctx.status_message = event.message
+        # Ensure output is cleared and fresh original metadata is loaded from original input file
+        task_ctx.output_path = None
+        task_ctx.meta = await probe_media(task_ctx.input_path)
+        try:
+            task_ctx.status_message = await event.get_message()
+        except Exception:
+            pass
 
-        summary = meta.get_summary_card(current_hardware.description)
+        term_log("PROCESS", f"Reloaded original source file for re-processing: {task_ctx.input_path.name}", task_id=task_id)
+        summary = task_ctx.meta.get_summary_card(current_hardware.description)
         menu = build_main_menu(task_id)
         await event.edit(summary, buttons=menu)
-        await event.answer("Ready! Select another optimization or conversion mode:")
+        await event.answer("Loaded original file! Select another optimization or conversion mode:", alert=False)
         return
 
     # 6. Execute Optimization Job
     if action_type == "opt_run":
         sub_mode = parts[1]
         task_id = parts[2]
-        task_ctx = task_manager.get_task(task_id)
+        task_ctx = await get_or_restore_task_ctx(task_id, event)
         if not task_ctx:
             await event.answer("Session expired or file was deleted.", alert=True)
             return
 
-        term_log("PROCESS", f"User selected Optimization ({sub_mode.upper()})", task_id=task_id)
+        task_ctx.output_path = None
+        try:
+            task_ctx.status_message = await event.get_message()
+        except Exception:
+            pass
+
+        term_log("PROCESS", f"User selected Optimization ({sub_mode.upper()}) using original source: {task_ctx.input_path.name}", task_id=task_id)
         await event.answer("Starting optimization...")
         asyncio.create_task(process_optimization(task_ctx, sub_mode, client))
         return
@@ -263,13 +300,19 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
     if action_type == "conv_run":
         target_fmt = parts[1]
         task_id = parts[2]
-        task_ctx = task_manager.get_task(task_id)
+        task_ctx = await get_or_restore_task_ctx(task_id, event)
         if not task_ctx:
             await event.answer("Session expired or file was deleted.", alert=True)
             return
 
+        task_ctx.output_path = None
+        try:
+            task_ctx.status_message = await event.get_message()
+        except Exception:
+            pass
+
         label = "Smartphone Audio Fix (AAC)" if target_fmt == "audio_fix" else f"Conversion ({target_fmt.upper()})"
-        term_log("PROCESS", f"User selected {label}", task_id=task_id)
+        term_log("PROCESS", f"User selected {label} using original source: {task_ctx.input_path.name}", task_id=task_id)
         await event.answer("Fixing audio for smartphones..." if target_fmt == "audio_fix" else f"Converting to {target_fmt.upper()}...")
         asyncio.create_task(process_conversion(task_ctx, target_fmt, client))
         return
