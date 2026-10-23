@@ -11,6 +11,7 @@ from telethon import events
 from config.settings import settings
 from core.probe import probe_media
 from core.hardware import current_hardware
+from core.terminal import term_log
 from database.models import upsert_user
 from bot.keyboards import build_main_menu
 from bot.progress import ThrottledMessageUpdater, format_progress_status
@@ -59,11 +60,23 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
 
     save_path = settings.DOWNLOAD_DIR / f"{task_id}_{clean_name}"
 
+    term_log("RECEIVE", f"Incoming video from user {user_id} ({file_name})", task_id=task_id)
+
     status_msg = await event.reply("*Receiving video from Telegram...*\nConnecting to stream...")
     updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
     start_time = time.time()
+    last_term_log = 0.0
 
     async def download_progress(current_bytes: int, total_bytes: int):
+        nonlocal last_term_log
+        now = time.time()
+        percent = (current_bytes / total_bytes * 100) if total_bytes > 0 else 0
+        speed_mb = (current_bytes / max(0.1, now - start_time)) / (1024 * 1024)
+
+        if now - last_term_log >= 2.0:
+            last_term_log = now
+            term_log("DOWNLOAD", f"Downloading {clean_name}", task_id=task_id, progress=percent, extra=f"{speed_mb:.1f} MB/s")
+
         text = format_progress_status(
             action_label="*Downloading Video from Telegram:*",
             current_bytes=current_bytes,
@@ -80,10 +93,12 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
             progress_callback=download_progress
         )
         
+        term_log("PROBE", f"Inspecting media streams with FFprobe...", task_id=task_id)
         await updater.update("*Analyzing video streams with FFprobe...*", force=True)
 
         # Probe video
         meta = await probe_media(save_path)
+        term_log("PROBE", f"Analyzed: {meta.resolution_label} | {meta.duration_seconds:.1f}s | {meta.video_codec} | {meta.overall_bitrate_kbps} kbps", task_id=task_id)
 
         # Build analysis card and main menu
         summary_text = meta.get_summary_card(hardware_summary=current_hardware.description)
@@ -105,6 +120,7 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
         await status_msg.edit(summary_text, buttons=main_menu)
 
     except Exception as e:
+        term_log("ERROR", f"Failed download or analysis: {str(e)}", task_id=task_id)
         logger.error(f"Error handling incoming video: {e}", exc_info=True)
         if save_path.exists():
             try:

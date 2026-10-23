@@ -11,6 +11,7 @@ from telethon import events
 from config.settings import settings
 from core.probe import format_bytes, format_duration
 from core.hardware import current_hardware
+from core.terminal import term_log
 from core.engine import run_ffmpeg_with_progress
 from core.optimizer import VideoOptimizer
 from core.converter import VideoConverter
@@ -107,6 +108,7 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         
         task_manager.remove_task(task_id)
         disk_info = settings.get_disk_usage()
+        term_log("STORAGE", f"Deleted local temporary files for task {task_id}", task_id=task_id, extra=f"{disk_info['free_gb']} GB free")
         await event.edit(
             "*Server storage cleaned!*\n\n"
             "Deleted temporary source & output files from server.\n"
@@ -119,6 +121,7 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         task_id = parts[1]
         task_manager.remove_task(task_id)
         disk_info = settings.get_disk_usage()
+        term_log("STORAGE", f"Retained files in server cache for task {task_id}", task_id=task_id)
         await event.edit(
             "*File retained in server cache.*\n\n"
             f"*Current Server Free Space:* `{disk_info['free_gb']} GB free / {disk_info['total_gb']} GB total`\n"
@@ -136,6 +139,7 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             await event.answer("Session expired or file was deleted.", alert=True)
             return
 
+        term_log("PROCESS", f"User selected Optimization ({sub_mode.upper()})", task_id=task_id)
         await event.answer("Starting optimization...")
         asyncio.create_task(process_optimization(task_ctx, sub_mode, client))
         return
@@ -149,6 +153,7 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             await event.answer("Session expired or file was deleted.", alert=True)
             return
 
+        term_log("PROCESS", f"User selected Conversion ({target_fmt.upper()})", task_id=task_id)
         await event.answer(f"Converting to {target_fmt.upper()}...")
         asyncio.create_task(process_conversion(task_ctx, target_fmt, client))
         return
@@ -198,9 +203,16 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
             else:
                 cmd, explanation = VideoOptimizer.build_auto_recommended_args(meta, out_path, current_hardware)
 
+            last_proc_log = 0.0
             async def transcode_progress(percent: float, speed: str, eta: int, fps: float):
-                bar = make_progress_bar(percent)
+                nonlocal last_proc_log
+                now = time.time()
                 eta_str = f"{eta}s" if eta is not None else "--"
+                if now - last_proc_log >= 2.0:
+                    last_proc_log = now
+                    term_log("PROCESS", f"Transcoding ({mode_label})", task_id=task_id, progress=percent, extra=f"speed {speed}, fps {fps:.1f}, eta {eta_str}")
+
+                bar = make_progress_bar(percent)
                 text = (
                     f"*{mode_label} in Progress:*\n"
                     f"Progress: {bar}\n"
@@ -209,6 +221,7 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 )
                 await updater.update(text)
 
+            term_log("PROCESS", f"Starting FFmpeg transcode pipeline ({mode_label})", task_id=task_id)
             # Run FFmpeg transcode
             await run_ffmpeg_with_progress(
                 cmd=cmd,
@@ -231,7 +244,15 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
 
             # Upload to Telegram with live progress
             upload_start = time.time()
+            last_up_log = 0.0
             async def upload_progress(current_bytes: int, total_bytes: int):
+                nonlocal last_up_log
+                now = time.time()
+                percent = (current_bytes / total_bytes * 100) if total_bytes > 0 else 0
+                if now - last_up_log >= 2.0:
+                    last_up_log = now
+                    term_log("UPLOAD", f"Uploading optimized video", task_id=task_id, progress=percent)
+
                 text = format_progress_status(
                     action_label="*Uploading Optimized Video to Telegram:*",
                     current_bytes=current_bytes,
@@ -267,6 +288,7 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
 
             # Record completion in DB
             await record_task_complete(task_id, out_size, elapsed_time)
+            term_log("DONE", f"Delivered to user! Saved {format_bytes(saved_bytes)} ({ratio:.1f}%) in {elapsed_time}s", task_id=task_id)
 
             # Prompt user for disk cleanup
             disk = settings.get_disk_usage()
@@ -315,9 +337,17 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
         try:
             cmd, is_audio = VideoConverter.build_convert_args(meta, target_fmt, out_path, current_hardware)
 
+            term_log("PROCESS", f"Starting conversion pipeline ({target_fmt.upper()})", task_id=task_id)
+            last_conv_log = 0.0
             async def transcode_progress(percent: float, speed: str, eta: int, fps: float):
-                bar = make_progress_bar(percent)
+                nonlocal last_conv_log
+                now = time.time()
                 eta_str = f"{eta}s" if eta is not None else "--"
+                if now - last_conv_log >= 2.0:
+                    last_conv_log = now
+                    term_log("PROCESS", f"Converting ({target_fmt.upper()})", task_id=task_id, progress=percent, extra=f"speed {speed}, eta {eta_str}")
+
+                bar = make_progress_bar(percent)
                 text = (
                     f"*Converting to {target_fmt.upper()}:*\n"
                     f"Progress: {bar}\n"
@@ -347,7 +377,15 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
 
             # Upload with progress
             upload_start = time.time()
+            last_up_log = 0.0
             async def upload_progress(current_bytes: int, total_bytes: int):
+                nonlocal last_up_log
+                now = time.time()
+                percent = (current_bytes / total_bytes * 100) if total_bytes > 0 else 0
+                if now - last_up_log >= 2.0:
+                    last_up_log = now
+                    term_log("UPLOAD", f"Uploading converted {target_fmt.upper()}", task_id=task_id, progress=percent)
+
                 text = format_progress_status(
                     action_label=f"*Uploading {target_fmt.upper()} to Telegram:*",
                     current_bytes=current_bytes,
@@ -384,6 +422,7 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
 
             # Record completion in DB
             await record_task_complete(task_id, out_size, elapsed_time)
+            term_log("DONE", f"Delivered {target_fmt.upper()} to user! Size: {format_bytes(out_size)} in {elapsed_time}s", task_id=task_id)
 
             # Prompt user for disk cleanup
             disk = settings.get_disk_usage()

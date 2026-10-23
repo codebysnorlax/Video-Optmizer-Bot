@@ -9,41 +9,39 @@ import logging
 import asyncio
 from config.settings import settings
 from core.hardware import current_hardware
+from core.terminal import ColoredLogFormatter, print_banner_box, BOLD_GREEN, RESET
 from database.db import init_db
 from bot.client import create_bot_client
 
-# Configure logging
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    datefmt="%Y-%m-%d %H:%M:%S"
-)
+# Configure colorful structured logging
+handler = logging.StreamHandler(sys.stdout)
+handler.setFormatter(ColoredLogFormatter())
+root_logger = logging.getLogger()
+root_logger.setLevel(logging.INFO)
+root_logger.handlers = [handler]
+
 logger = logging.getLogger("OptimizerBot")
 
 
 def print_startup_banner() -> None:
-    """Prints a clear system status diagnostic banner."""
+    """Prints a clear, colorful system diagnostic box."""
     disk = settings.get_disk_usage()
-    banner = f"""
-======================================================================
-TELEGRAM VIDEO OPTIMIZER & CONVERTER BOT
-======================================================================
-OS Platform       : {current_hardware.os_name} ({current_hardware.arch})
-Mobile Termux     : {"YES (Android 10 SDM636)" if current_hardware.is_termux else "NO (Standard Linux)"}
-CPU Specification : {current_hardware.cpu_model} ({current_hardware.cpu_cores} threads)
-Memory Status     : {current_hardware.available_ram_mb} MB available / {current_hardware.total_ram_mb} MB total
-Hardware Accel    : {current_hardware.description}
-Primary Encoder   : {current_hardware.video_encoder}
-Host Disk Space   : {disk['free_gb']} GB free / {disk['total_gb']} GB total ({disk['percent_used']}% used)
-Storage Temp Dirs : {settings.DOWNLOAD_DIR}
-Database Location : {settings.DB_PATH}
-======================================================================
-"""
-    print(banner, flush=True)
+    items = [
+        ("OS Platform", f"{current_hardware.os_name} ({current_hardware.arch})"),
+        ("Mobile Termux", "YES (Android 10 SDM636)" if current_hardware.is_termux else "NO (Standard Linux)"),
+        ("CPU Model", f"{current_hardware.cpu_model} ({current_hardware.cpu_cores} threads)"),
+        ("Memory Status", f"{current_hardware.available_ram_mb} MB free / {current_hardware.total_ram_mb} MB total"),
+        ("Hardware Accel", current_hardware.description),
+        ("Primary Encoder", current_hardware.video_encoder),
+        ("Host Disk Space", f"{disk['free_gb']} GB free / {disk['total_gb']} GB total"),
+        ("Storage Temp Dir", str(settings.DOWNLOAD_DIR)),
+        ("Database File", str(settings.DB_PATH))
+    ]
+    print_banner_box("TELEGRAM VIDEO OPTIMIZER & CONVERTER BOT", items)
 
 
 async def main() -> None:
-    # 1. Print system diagnostic banner
+    # 1. Print colorful system diagnostic banner
     print_startup_banner()
 
     # 2. Validate configuration
@@ -63,7 +61,7 @@ async def main() -> None:
     await client.start(bot_token=settings.BOT_TOKEN)
     me = await client.get_me()
     logger.info(f"Bot successfully authenticated as @{me.username} (ID: {me.id})")
-    print(f"\n>>> Bot is online and listening for videos as @{me.username} <<<\n", flush=True)
+    print(f"\n{BOLD_GREEN}>>> Bot is online and listening for videos as @{me.username} <<<{RESET}\n", flush=True)
 
     # 5. Run bot loop until disconnected
     await client.run_until_disconnected()
