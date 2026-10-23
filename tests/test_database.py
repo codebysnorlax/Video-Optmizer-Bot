@@ -75,3 +75,29 @@ async def test_database_crud(tmp_path: Path, monkeypatch):
     history = await get_user_recent_tasks(user_id, limit=5)
     assert len(history) == 1
     assert history[0]["task_id"] == task_id
+
+    # Test get_user_cached_files and get_single_cached_file with physical files
+    file_a = tmp_path / "vid_a.mp4"
+    file_a.write_bytes(b"0" * 1024)
+    file_b = tmp_path / "vid_b.mp4"
+    file_b.write_bytes(b"1" * 2048)
+
+    task_id2 = "test_task_456"
+    await register_file_cache(task_id2, user_id, str(file_a), str(file_b))
+
+    from database.models import get_user_cached_files, get_single_cached_file
+    cached = await get_user_cached_files(user_id)
+    assert len(cached) == 2
+    types = [c["file_type"] for c in cached]
+    assert "original" in types
+    assert "processed" in types
+
+    single_orig = await get_single_cached_file(user_id, task_id2, "original")
+    assert single_orig is not None
+    assert single_orig["name"] == "vid_a.mp4"
+    assert single_orig["size"] == 1024
+
+    single_opt = await get_single_cached_file(user_id, task_id2, "processed")
+    assert single_opt is not None
+    assert single_opt["name"] == "vid_b.mp4"
+    assert single_opt["size"] == 2048

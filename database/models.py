@@ -2,8 +2,10 @@
 Database Models & Query Repository
 """
 
+import os
 import aiosqlite
 import logging
+from pathlib import Path
 from typing import Optional, List, Dict, Any
 from config.settings import settings
 
@@ -153,3 +155,65 @@ async def get_user_recent_tasks(user_id: int, limit: int = 5) -> List[Dict[str, 
         """, (user_id, limit)) as cursor:
             rows = await cursor.fetchall()
             return [dict(r) for r in rows]
+
+
+async def get_user_cached_files(user_id: int) -> List[Dict[str, Any]]:
+    """Retrieves all cached files for a user that still exist on server disk."""
+    items = []
+    async with aiosqlite.connect(settings.DB_PATH) as db:
+        db.row_factory = aiosqlite.Row
+        async with db.execute(
+            "SELECT * FROM file_cache WHERE user_id = ? ORDER BY created_at DESC",
+            (user_id,)
+        ) as cursor:
+            rows = await cursor.fetchall()
+            for r in rows:
+                data = dict(r)
+                task_id = data["task_id"]
+                created_at = data.get("created_at", "")
+
+                # Check original input file
+                in_path = data.get("input_path")
+                if data.get("input_deleted", 0) == 0 and in_path and os.path.exists(in_path):
+                    items.append({
+                        "task_id": task_id,
+                        "file_type": "original",
+                        "path": in_path,
+                        "name": Path(in_path).name,
+                        "size": os.path.getsize(in_path),
+                        "created_at": created_at
+                    })
+
+                # Check processed output file
+                out_path = data.get("output_path")
+                if data.get("output_deleted", 0) == 0 and out_path and os.path.exists(out_path):
+                    items.append({
+                        "task_id": task_id,
+                        "file_type": "processed",
+                        "path": out_path,
+                        "name": Path(out_path).name,
+                        "size": os.path.getsize(out_path),
+                        "created_at": created_at
+                    })
+    return items
+
+
+async def get_single_cached_file(user_id: int, task_id: str, file_type: str) -> Optional[Dict[str, Any]]:
+    """Retrieves a single cached file entry if it exists on server disk."""
+    cache = await get_file_cache(task_id)
+    if not cache or cache.get("user_id") != user_id:
+        return None
+
+    path = cache.get("input_path") if file_type == "original" else cache.get("output_path")
+    deleted = cache.get("input_deleted") if file_type == "original" else cache.get("output_deleted")
+    if deleted or not path or not os.path.exists(path):
+        return None
+
+    return {
+        "task_id": task_id,
+        "file_type": file_type,
+        "path": path,
+        "name": Path(path).name,
+        "size": os.path.getsize(path),
+        "created_at": cache.get("created_at", "")
+    }

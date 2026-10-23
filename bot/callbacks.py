@@ -4,10 +4,11 @@ Interactive Button Callback Handler & Transcoding Dispatcher
 
 import os
 import time
+import uuid
 import asyncio
 import logging
 from pathlib import Path
-from telethon import events
+from telethon import events, Button
 from config.settings import settings
 from core.probe import (
     format_bytes,
@@ -28,14 +29,20 @@ from database.models import (
     get_file_cache,
     mark_input_file_deleted,
     mark_output_file_deleted,
-    mark_file_cache_deleted
+    mark_file_cache_deleted,
+    get_user_cached_files,
+    get_single_cached_file
 )
 from bot.keyboards import (
     build_main_menu,
     build_optimize_menu,
     build_convert_menu,
     build_cleanup_original_menu,
-    build_cleanup_output_menu
+    build_cleanup_output_menu,
+    build_files_list_menu,
+    build_file_action_menu,
+    build_recall_progress_menu,
+    build_confirm_stop_menu
 )
 from bot.progress import (
     ThrottledMessageUpdater,
@@ -43,7 +50,7 @@ from bot.progress import (
     make_progress_bar,
     format_time_breakdown
 )
-from bot.task_manager import task_manager
+from bot.task_manager import task_manager, TaskContext, RecallContext
 
 logger = logging.getLogger(__name__)
 
@@ -80,10 +87,10 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             return
         menu = build_optimize_menu(task_id)
         text = (
-            "*Select Optimization Mode:*\n\n"
-            "*1. Low Device:* Max compatibility (H.264 Baseline/Main), lower bitrate for budget/older devices.\n"
-            "*2. Moderate:* Balanced mid-range profile, crisp 1080p/720p clarity.\n"
-            "*3. Auto Recommended:* Smart analyzer automatically fixes high bitrate bloat (e.g. 500MB camera file) with zero perceptual quality loss."
+            "**Select Optimization Mode:**\n\n"
+            "**1. Low Device:** Max compatibility (H.264 Baseline/Main), lower bitrate for budget/older devices.\n"
+            "**2. Moderate:** Balanced mid-range profile, crisp 1080p/720p clarity.\n"
+            "**3. Auto Recommended:** Smart analyzer automatically fixes high bitrate bloat (e.g. 500MB camera file) with zero perceptual quality loss."
         )
         await event.edit(text, buttons=menu)
         return
@@ -97,7 +104,7 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             return
         menu = build_convert_menu(task_id)
         text = (
-            "*Select Target Conversion Format:*\n\n"
+            "**Select Target Conversion Format:**\n\n"
             "• Quick Fix: `Fix Audio (Smartphone AAC)`\n"
             "• Video: `MP4`, `MKV`, `WEBM`, `AVI`, `MOV`, `MPG`\n"
             "• Audio Extraction: `MP3`, `AAC`"
@@ -139,11 +146,11 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         opt_size_str = format_bytes(opt_size)
 
         step2_text = (
-            f"Step 1 of 2 Complete:\n"
-            f"• Original File: `{orig_name}` ({orig_status})\n\n"
-            "Step 2 of 2: Processed File Cleanup\n"
-            f"• Processed File: `{opt_name}` ({opt_size_str})\n"
-            f"• Server Free Space: `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
+            f"**Step 1 of 2 Complete:**\n"
+            f"• **Original File:** `{orig_name}` ({orig_status})\n\n"
+            "**Step 2 of 2: Processed File Cleanup**\n"
+            f"• **Processed File:** `{opt_name}` ({opt_size_str})\n"
+            f"• **Server Free Space:** `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
             "Would you like to delete the processed file from the server now?"
         )
         await event.edit(step2_text, buttons=build_cleanup_output_menu(task_id))
@@ -186,10 +193,10 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         disk = settings.get_disk_usage()
 
         final_text = (
-            "Server Storage Cleanup Complete:\n\n"
-            f"• Original File: `{orig_name}` -> {orig_status}\n"
-            f"• Processed File: `{opt_name}` -> {opt_status}\n\n"
-            f"Current Server Free Space: `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
+            "**Server Storage Cleanup Complete:**\n\n"
+            f"• **Original File:** `{orig_name}` -> {orig_status}\n"
+            f"• **Processed File:** `{opt_name}` -> {opt_status}\n\n"
+            f"**Current Server Free Space:** `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
             "All set! Ready for your next video."
         )
         await event.edit(final_text)
@@ -225,6 +232,301 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         asyncio.create_task(process_conversion(task_ctx, target_fmt, client))
         return
 
+    # 8. Files List Navigation & Pagination
+    if action_type == "flist":
+        page = int(parts[1]) if len(parts) > 1 and parts[1].isdigit() else 0
+        user_id = event.sender_id
+        files = await get_user_cached_files(user_id)
+        disk = settings.get_disk_usage()
+
+        if not files:
+            text = (
+                "**Server Cached Files**\n\n"
+                "You have no active files currently cached on the server.\n"
+                "All past files have either been deleted or cleaned up.\n\n"
+                f"• **Server Free Space:** `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)"
+            )
+            await event.edit(text, buttons=[[Button.inline("Refresh List", data=b"flist:0")]])
+            await event.answer()
+            return
+
+        total_size = sum(f["size"] for f in files)
+        text = (
+            f"**Server Cached Files ({len(files)} stored)**\n\n"
+            f"• **Total Cache Stored:** `{format_bytes(total_size)}`\n"
+            f"• **Server Free Space:** `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
+            "Select any file below to **Recall** (send back to you) or **Delete** from server:"
+        )
+        menu = build_files_list_menu(files, page=page)
+        await event.edit(text, buttons=menu)
+        await event.answer()
+        return
+
+    # 9. View Specific Cached File
+    if action_type == "fview":
+        file_type = parts[1]
+        task_id = parts[2]
+        user_id = event.sender_id
+        file_info = await get_single_cached_file(user_id, task_id, file_type)
+        if not file_info:
+            await event.answer("This file is no longer available on server.", alert=True)
+            files = await get_user_cached_files(user_id)
+            if files:
+                await event.edit(
+                    f"**Server Cached Files ({len(files)} stored):**",
+                    buttons=build_files_list_menu(files, page=0)
+                )
+            return
+
+        disk = settings.get_disk_usage()
+        type_label = "Original Source Video" if file_type == "original" else "Processed / Optimized Output"
+        text = (
+            "**File Details:**\n\n"
+            f"• **Name:** `{file_info['name']}`\n"
+            f"• **Role:** {type_label}\n"
+            f"• **Size:** `{format_bytes(file_info['size'])}`\n"
+            f"• **Date Cached:** `{file_info['created_at']}`\n"
+            f"• **Server Free Space:** `{disk['free_gb']} GB / {disk['total_gb']} GB`\n\n"
+            "Choose an action below:"
+        )
+        await event.edit(text, buttons=build_file_action_menu(task_id, file_type))
+        await event.answer()
+        return
+
+    # 10. Delete Individual Cached File
+    if action_type == "del_f":
+        file_type = parts[1]
+        task_id = parts[2]
+        user_id = event.sender_id
+        file_info = await get_single_cached_file(user_id, task_id, file_type)
+        if not file_info:
+            await event.answer("File already removed or not found.", alert=True)
+            return
+
+        file_path = file_info["path"]
+        if file_path and os.path.exists(file_path):
+            try:
+                os.remove(file_path)
+            except Exception as e:
+                logger.error(f"Error removing cached file {file_path}: {e}")
+
+        if file_type == "original":
+            await mark_input_file_deleted(task_id)
+        else:
+            await mark_output_file_deleted(task_id)
+
+        term_log("STORAGE", f"Deleted {file_type} file {file_info['name']}", task_id=task_id)
+        disk = settings.get_disk_usage()
+        freed = format_bytes(file_info["size"])
+
+        text = (
+            "**File Deleted from Server**\n\n"
+            f"• **Deleted File:** `{file_info['name']}`\n"
+            f"• **Freed Space:** `{freed}`\n"
+            f"• **Current Server Free Space:** `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
+            "The file has been permanently removed from the host machine."
+        )
+        await event.edit(text, buttons=[[Button.inline("< Back to Files List", data=b"flist:0")]])
+        await event.answer("File deleted from server.", alert=False)
+        return
+
+    # 11. Initiate Recall (Re-send file to user)
+    if action_type == "recall":
+        file_type = parts[1]
+        task_id = parts[2]
+        user_id = event.sender_id
+        file_info = await get_single_cached_file(user_id, task_id, file_type)
+        if not file_info:
+            await event.answer("File is no longer available on server.", alert=True)
+            return
+
+        recall_id = uuid.uuid4().hex[:8]
+        file_path = Path(file_info["path"])
+        file_name = file_info["name"]
+        file_size = file_info["size"]
+
+        recall_ctx = RecallContext(
+            recall_id=recall_id,
+            user_id=user_id,
+            task_id=task_id,
+            file_type=file_type,
+            file_path=file_path,
+            file_name=file_name,
+            file_size=file_size,
+            status_msg=event
+        )
+        task_manager.register_recall(recall_ctx)
+
+        term_log("UPLOAD", f"User requested recall for {file_name}", task_id=task_id)
+        await event.answer("Starting recall upload...")
+
+        # Initial status edit with Stop Sending button
+        init_text = (
+            f"**Recalling `{file_name}` to Telegram:**\n"
+            f"**Progress:** [░░░░░░░░░░] 0.0%\n"
+            f"**Size:** `0.0 MB / {file_size / (1024 * 1024):.1f} MB`\n"
+            "**Status:** Preparing upload..."
+        )
+        await event.edit(init_text, buttons=build_recall_progress_menu(recall_id))
+
+        upload_task = asyncio.create_task(do_recall_upload(recall_ctx, client))
+        recall_ctx.upload_task = upload_task
+        return
+
+    # 12. User Clicked Stop Sending -> Show 2-Step Confirmation
+    if action_type == "stop_rec":
+        recall_id = parts[1]
+        recall_ctx = task_manager.get_recall(recall_id)
+        if not recall_ctx:
+            await event.answer("Transfer is no longer active or already completed.", alert=True)
+            return
+
+        recall_ctx.is_confirming_stop = True
+        confirm_text = (
+            "**Confirm Stop Sending**\n\n"
+            f"Are you sure you want to stop sending **{recall_ctx.file_name}**?\n\n"
+            "If stopped, the file transfer will be aborted immediately."
+        )
+        await event.edit(confirm_text, buttons=build_confirm_stop_menu(recall_id))
+        await event.answer()
+        return
+
+    # 13. Confirmed Stop Sending (Yes)
+    if action_type == "yes_stop":
+        recall_id = parts[1]
+        recall_ctx = task_manager.get_recall(recall_id)
+        if not recall_ctx:
+            await event.edit(
+                "**Transfer Already Ended**\n\nThe upload has already stopped or completed.",
+                buttons=[[Button.inline("< Back to Files List", data=b"flist:0")]]
+            )
+            await event.answer()
+            return
+
+        recall_ctx.is_cancelled = True
+        recall_ctx.is_confirming_stop = False
+        if recall_ctx.upload_task and not recall_ctx.upload_task.done():
+            recall_ctx.upload_task.cancel()
+        task_manager.remove_recall(recall_id)
+
+        term_log("UPLOAD", f"User confirmed STOP transfer for {recall_ctx.file_name}", task_id=recall_ctx.task_id)
+        stop_text = (
+            "**Recall Stopped**\n\n"
+            f"The file upload for **{recall_ctx.file_name}** was cancelled by user."
+        )
+        await event.edit(stop_text, buttons=[[Button.inline("< Back to Files List", data=b"flist:0")]])
+        await event.answer("Transfer cancelled.", alert=False)
+        return
+
+    # 14. Abort Stop Sending (No, Continue Sending)
+    if action_type == "no_stop":
+        recall_id = parts[1]
+        recall_ctx = task_manager.get_recall(recall_id)
+        if not recall_ctx:
+            await event.answer("Transfer has already completed or expired.", alert=True)
+            return
+
+        recall_ctx.is_confirming_stop = False
+        resume_text = (
+            f"**Recalling `{recall_ctx.file_name}` to Telegram:**\n"
+            "**Status:** Resuming transfer..."
+        )
+        await event.edit(resume_text, buttons=build_recall_progress_menu(recall_id))
+        await event.answer("Resuming upload...", alert=False)
+        return
+
+
+async def do_recall_upload(recall_ctx: RecallContext, client) -> None:
+    """Handles background upload of recalled file with live progress and cancellation."""
+    task_id = recall_ctx.task_id
+    user_id = recall_ctx.user_id
+    recall_id = recall_ctx.recall_id
+    file_path = recall_ctx.file_path
+    file_name = recall_ctx.file_name
+    file_size = recall_ctx.file_size
+    msg = recall_ctx.status_msg
+
+    updater = ThrottledMessageUpdater(msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
+    upload_start = time.time()
+    last_log = 0.0
+
+    async def recall_progress(current_bytes: int, total_bytes: int):
+        nonlocal last_log
+        if recall_ctx.is_cancelled:
+            raise asyncio.CancelledError()
+        if recall_ctx.is_confirming_stop:
+            return  # Do not overwrite confirmation prompt
+
+        now = time.time()
+        percent = (current_bytes / total_bytes * 100) if total_bytes > 0 else 0
+        if now - last_log >= 0.15:
+            last_log = now
+            term_log("UPLOAD", f"Recalling {file_name}", task_id=task_id, progress=percent, live=True)
+
+        text = format_progress_status(
+            action_label=f"**Recalling `{file_name}` to Telegram:**",
+            current_bytes=current_bytes,
+            total_bytes=total_bytes,
+            start_time=upload_start
+        )
+        await updater.update(text, buttons=build_recall_progress_menu(recall_id))
+
+    try:
+        ext = file_path.suffix.lower()
+        is_audio = ext in (".mp3", ".aac", ".wav", ".m4a", ".flac")
+        if is_audio:
+            await client.send_file(
+                entity=user_id,
+                file=str(file_path),
+                caption=f"`{file_name}`",
+                voice_note=False,
+                progress_callback=recall_progress
+            )
+        else:
+            await client.send_file(
+                entity=user_id,
+                file=str(file_path),
+                caption=f"`{file_name}`",
+                supports_streaming=True,
+                progress_callback=recall_progress
+            )
+
+        if not recall_ctx.is_cancelled:
+            upload_time = round(time.time() - upload_start, 1)
+            term_log("UPLOAD", f"Recall completed for {file_name} in {upload_time}s", task_id=task_id, live=False)
+            complete_text = (
+                "**File Recall Complete!**\n\n"
+                f"• **File:** `{file_name}`\n"
+                f"• **Size:** `{format_bytes(file_size)}`\n"
+                f"• **Transfer Time:** `{upload_time}s`\n"
+                "• **Status:** Delivered to your chat."
+            )
+            try:
+                await msg.edit(complete_text, buttons=[[Button.inline("< Back to Files List", data=b"flist:0")]])
+            except Exception:
+                pass
+    except (asyncio.CancelledError, Exception) as e:
+        if recall_ctx.is_cancelled or isinstance(e, asyncio.CancelledError):
+            term_log("UPLOAD", f"Recall transfer cancelled for {file_name}", task_id=task_id, live=False)
+            try:
+                await msg.edit(
+                    f"**Recall Cancelled**\n\nThe file transfer for `{file_name}` was stopped.",
+                    buttons=[[Button.inline("< Back to Files List", data=b"flist:0")]]
+                )
+            except Exception:
+                pass
+        else:
+            logger.error(f"Recall upload failed for {file_name}: {e}", exc_info=True)
+            try:
+                await msg.edit(
+                    f"[ERROR] **Recall Failed:**\n`{str(e)}`",
+                    buttons=[[Button.inline("< Back to Files List", data=b"flist:0")]]
+                )
+            except Exception:
+                pass
+    finally:
+        task_manager.remove_recall(recall_id)
+
 
 async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None:
     """Executes the chosen video optimization pipeline."""
@@ -255,7 +557,7 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
     )
 
     updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
-    await updater.update(f"*Queued for {mode_label}...*\nWaiting for processing slot...", force=True)
+    await updater.update(f"**Queued for {mode_label}...**\nWaiting for processing slot...", force=True)
 
     start_exec = time.time()
 
@@ -281,10 +583,10 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
 
                 bar = make_progress_bar(percent)
                 text = (
-                    f"*{mode_label} in Progress:*\n"
-                    f"Progress: {bar}\n"
-                    f"Speed: `{speed}` | FPS: `{fps:.1f}` | ETA: `{eta_str}`\n"
-                    f"Engine: `{current_hardware.description}`"
+                    f"**{mode_label} in Progress:**\n"
+                    f"**Progress:** {bar}\n"
+                    f"**Speed:** `{speed}` | **FPS:** `{fps:.1f}` | **ETA:** `{eta_str}`\n"
+                    f"**Engine:** `{current_hardware.description}`"
                 )
                 await updater.update(text)
 
@@ -323,7 +625,7 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                     term_log("UPLOAD", f"Uploading optimized video", task_id=task_id, progress=percent, live=True)
 
                 text = format_progress_status(
-                    action_label="*Uploading Optimized Video to Telegram:*",
+                    action_label="**Uploading Optimized Video to Telegram:**",
                     current_bytes=current_bytes,
                     total_bytes=total_bytes,
                     start_time=upload_start
@@ -376,18 +678,18 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
             orig_size_str = format_bytes(meta.file_size_bytes)
 
             report_parts = [
-                f"*{mode_label} Complete!*\n",
+                f"**{mode_label} Complete!**\n",
                 analysis_md,
                 "\n" + time_breakdown_str,
-                f"\n*Engine:* `{current_hardware.description}`"
+                f"\n• **Engine:** `{current_hardware.description}`"
             ]
             if explanation:
-                report_parts.append(f"\n*Fixes Applied:*\n{explanation}")
+                report_parts.append(f"\n• **Fixes Applied:**\n{explanation}")
 
             report_parts.append(
-                "\nStep 1 of 2: Original File Cleanup\n"
-                f"• Original Source File: `{orig_name}` ({orig_size_str})\n"
-                f"• Server Free Space: `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
+                "\n**Step 1 of 2: Original File Cleanup**\n"
+                f"• **Original Source File:** `{orig_name}` ({orig_size_str})\n"
+                f"• **Server Free Space:** `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
                 "Would you like to delete the original source file from the server now?"
             )
             report_text = "\n".join(report_parts)
@@ -420,7 +722,7 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
             logger.error(f"Optimization error for task {task_id}: {e}", exc_info=True)
             elapsed_time = round(time.time() - start_exec, 1)
             await record_task_failed(task_id, elapsed_time)
-            await status_msg.edit(f"[ERROR] *Optimization Failed:*\n`{str(e)}`")
+            await status_msg.edit(f"[ERROR] **Optimization Failed:**\n`{str(e)}`")
 
 
 async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> None:
@@ -451,7 +753,7 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
     )
 
     updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
-    await updater.update(f"*Queued for {conv_label}...*\nWaiting for processing slot...", force=True)
+    await updater.update(f"**Queued for {conv_label}...**\nWaiting for processing slot...", force=True)
 
     start_exec = time.time()
 
@@ -471,10 +773,10 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
 
                 bar = make_progress_bar(percent)
                 text = (
-                    f"*Converting to {target_fmt.upper()}:*\n"
-                    f"Progress: {bar}\n"
-                    f"Speed: `{speed}` | ETA: `{eta_str}`\n"
-                    f"Engine: `{current_hardware.description}`"
+                    f"**Converting to {target_fmt.upper()}:**\n"
+                    f"**Progress:** {bar}\n"
+                    f"**Speed:** `{speed}` | **ETA:** `{eta_str}`\n"
+                    f"**Engine:** `{current_hardware.description}`"
                 )
                 await updater.update(text)
 
@@ -511,7 +813,7 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                     term_log("UPLOAD", f"Uploading converted {target_fmt.upper()}", task_id=task_id, progress=percent, live=True)
 
                 text = format_progress_status(
-                    action_label=f"*Uploading {target_fmt.upper()} to Telegram:*",
+                    action_label=f"**Uploading {target_fmt.upper()} to Telegram:**",
                     current_bytes=current_bytes,
                     total_bytes=total_bytes,
                     start_time=upload_start
@@ -561,18 +863,18 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
             orig_size_str = format_bytes(meta.file_size_bytes)
 
             report_parts = [
-                f"*{conv_label} Complete!*\n",
+                f"**{conv_label} Complete!**\n",
                 analysis_md,
                 "\n" + time_breakdown_str,
-                f"\n*Engine:* `{current_hardware.description}`"
+                f"\n• **Engine:** `{current_hardware.description}`"
             ]
             if target_fmt == "audio_fix":
-                report_parts.append("\n*Fixes Applied:*\n• Copied video stream untouched without re-encoding (zero quality loss)\n• Transcoded audio to universal stereo AAC 192k for smartphone & TV compatibility\n• Optimized MP4 faststart for instant playback streaming")
+                report_parts.append("\n• **Fixes Applied:**\n  - Copied video stream untouched without re-encoding (zero quality loss)\n  - Transcoded audio to universal stereo AAC 192k for smartphone & TV compatibility\n  - Optimized MP4 faststart for instant playback streaming")
 
             report_parts.append(
-                "\nStep 1 of 2: Original File Cleanup\n"
-                f"• Original Source File: `{orig_name}` ({orig_size_str})\n"
-                f"• Server Free Space: `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
+                "\n**Step 1 of 2: Original File Cleanup**\n"
+                f"• **Original Source File:** `{orig_name}` ({orig_size_str})\n"
+                f"• **Server Free Space:** `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
                 "Would you like to delete the original source file from the server now?"
             )
             report_text = "\n".join(report_parts)
@@ -605,4 +907,4 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
             logger.error(f"Conversion error for task {task_id}: {e}", exc_info=True)
             elapsed_time = round(time.time() - start_exec, 1)
             await record_task_failed(task_id, elapsed_time)
-            await status_msg.edit(f"[ERROR] *Conversion Failed:*\n`{str(e)}`")
+            await status_msg.edit(f"[ERROR] **Conversion Failed:**\n`{str(e)}`")

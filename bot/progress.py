@@ -75,9 +75,9 @@ def format_progress_status(
 
     return (
         f"{action_label}\n"
-        f"Progress: {bar}\n"
-        f"Size: {cur_mb:.1f} MB / {tot_mb:.1f} MB\n"
-        f"Speed: {speed_mb:.1f} MB/s | ETA: {eta}s"
+        f"**Progress:** {bar}\n"
+        f"**Size:** `{cur_mb:.1f} MB / {tot_mb:.1f} MB`\n"
+        f"**Speed:** `{speed_mb:.1f} MB/s` | **ETA:** `{eta}s`"
     )
 
 
@@ -91,11 +91,11 @@ def format_time_breakdown(
 ) -> str:
     """Renders a clean text breakdown of all processing stage times."""
     return (
-        f"*Time Details:*\n"
-        f"• Receive & Download: `{download_time:.1f}s`\n"
-        f"• Media Analysis: `{probe_time:.1f}s`\n"
-        f"• Transcode / Processing: `{transcode_time:.1f}s`\n"
-        f"• Upload to Telegram: `{upload_time:.1f}s`\n"
-        f"• Total Active Pipeline: `{total_pipeline_time:.1f}s`\n"
-        f"• Total Overall Time: `{total_overall_time:.1f}s`"
+        f"**Time Details:**\n"
+        f"• **Receive & Download:** `{download_time:.1f}s`\n"
+        f"• **Media Analysis:** `{probe_time:.1f}s`\n"
+        f"• **Transcode / Processing:** `{transcode_time:.1f}s`\n"
+        f"• **Upload to Telegram:** `{upload_time:.1f}s`\n"
+        f"• **Total Active Pipeline:** `{total_pipeline_time:.1f}s`\n"
+        f"• **Total Overall Time:** `{total_overall_time:.1f}s`"
     )

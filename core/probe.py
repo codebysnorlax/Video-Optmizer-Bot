@@ -86,13 +86,13 @@ class MediaMetadata:
         # High bitrate alert
         bitrate_note = ""
         if self.is_high_bitrate and self.duration_seconds > 0:
-            bitrate_note = f"\n[NOTE] *High Bitrate Bloat:* ~{self.overall_bitrate_kbps // 1000} Mbps (Can be drastically optimized)"
+            bitrate_note = f"\n[NOTE] **High Bitrate Bloat:** ~{self.overall_bitrate_kbps // 1000} Mbps (Can be drastically optimized)"
 
         card = [
-            "*Video Analysis Report*",
-            f"*Name:* `{self.file_name}`",
-            f"*Size:* `{size_str}` {bitrate_note}",
-            f"*Duration:* `{dur_str}` ({int(self.duration_seconds)}s)",
+            "**Video Analysis Report**\n",
+            f"• **Name:** `{self.file_name}`",
+            f"• **Size:** `{size_str}` {bitrate_note}",
+            f"• **Duration:** `{dur_str}` ({int(self.duration_seconds)}s)",
         ]
 
         if self.has_video:
@@ -109,21 +109,21 @@ class MediaMetadata:
                 elif c_low == "av1":
                     codec_display = "AV1"
 
-            card.append(f"*Resolution:* `{self.resolution_label}`{fps_str}")
-            card.append(f"*Video Codec:* `{codec_display}`")
+            card.append(f"• **Resolution:** `{self.resolution_label}`{fps_str}")
+            card.append(f"• **Video Codec:** `{codec_display}`")
         
         if self.has_audio:
             ch_str = f"{self.audio_channels} ch" if self.audio_channels else "audio"
             sr_str = f"{self.audio_sample_rate}Hz" if self.audio_sample_rate else ""
             br_str = f" | {self.audio_bitrate_kbps} kbps" if self.audio_bitrate_kbps else ""
-            card.append(f"*Audio:* `{self.audio_codec.upper() if self.audio_codec else 'N/A'}` ({ch_str}, {sr_str}{br_str})")
+            card.append(f"• **Audio:** `{self.audio_codec.upper() if self.audio_codec else 'N/A'}` ({ch_str}, {sr_str}{br_str})")
         else:
-            card.append("*Audio:* `None`")
+            card.append("• **Audio:** `None`")
 
         if hardware_summary:
-            card.append(f"*Engine:* `{hardware_summary}`")
+            card.append(f"• **Engine:** `{hardware_summary}`")
 
-        card.append("\n*Select an action below to proceed:*")
+        card.append("\n**Select an action below to proceed:**")
         return "\n".join(card)
 
 
@@ -262,24 +262,24 @@ def format_before_after_analysis(before: MediaMetadata, after: MediaMetadata) ->
         inc_pct = (inc / before.file_size_bytes) * 100
         size_diff = f"{format_bytes(before.file_size_bytes)} -> {format_bytes(after.file_size_bytes)} (+{inc_pct:.1f}% for standard compatibility)"
 
-    lines = ["*Before & After Media Analysis:*"]
+    lines = ["**Before & After Media Analysis:**"]
     
     # Video resolution & codec
     if before.has_video and after.has_video:
-        lines.append(f"• Resolution: `{before.resolution_label}` -> `{after.resolution_label}`")
+        lines.append(f"• **Resolution:** `{before.resolution_label}` -> `{after.resolution_label}`")
         v_before = before.video_codec.upper() if before.video_codec else "Unknown"
         v_after = after.video_codec.upper() if after.video_codec else "Unknown"
-        lines.append(f"• Video Codec: `{v_before}` -> `{v_after}`")
+        lines.append(f"• **Video Codec:** `{v_before}` -> `{v_after}`")
     elif before.has_video and not after.has_video:
-        lines.append(f"• Video Stream: `{before.resolution_label}` -> `Stripped (Audio Only)`")
+        lines.append(f"• **Video Stream:** `{before.resolution_label}` -> `Stripped (Audio Only)`")
 
     # Audio codec & channels
     a_before = f"{before.audio_codec.upper()} ({before.audio_channels}ch)" if before.has_audio and before.audio_codec else "None"
     a_after = f"{after.audio_codec.upper()} ({after.audio_channels}ch)" if after.has_audio and after.audio_codec else "None"
-    lines.append(f"• Audio Codec: `{a_before}` -> `{a_after}`")
+    lines.append(f"• **Audio Codec:** `{a_before}` -> `{a_after}`")
 
     # Overall bitrate
-    lines.append(f"• Overall Bitrate: `{before.overall_bitrate_kbps} kbps` -> `{after.overall_bitrate_kbps} kbps`")
-    lines.append(f"• File Size: `{size_diff}`")
+    lines.append(f"• **Overall Bitrate:** `{before.overall_bitrate_kbps} kbps` -> `{after.overall_bitrate_kbps} kbps`")
+    lines.append(f"• **File Size:** `{size_diff}`")
 
     return "\n".join(lines)

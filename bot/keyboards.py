@@ -73,3 +73,67 @@ def build_cleanup_output_menu(task_id: str) -> List[List[Button]]:
             Button.inline("Keep Processed File", data=f"keep_opt:{task_id}".encode())
         ]
     ]
+
+
+def build_files_list_menu(files: list, page: int = 0, page_size: int = 5) -> List[List[Button]]:
+    """Builds interactive list of cached files with pagination."""
+    buttons = []
+    total_files = len(files)
+    start_idx = page * page_size
+    end_idx = min(start_idx + page_size, total_files)
+
+    for i in range(start_idx, end_idx):
+        f = files[i]
+        type_tag = "[Orig]" if f["file_type"] == "original" else "[Opt]"
+        # Format size
+        size_mb = f["size"] / (1024 * 1024)
+        size_str = f"{size_mb:.1f}M" if size_mb >= 1 else f"{f['size'] // 1024}K"
+        btn_label = f"{type_tag} {f['name'][:18]} ({size_str})"
+        callback = f"fview:{f['file_type']}:{f['task_id']}"
+        buttons.append([Button.inline(btn_label, data=callback.encode())])
+
+    # Pagination controls
+    nav_row = []
+    if page > 0:
+        nav_row.append(Button.inline("< Prev", data=f"flist:{page - 1}".encode()))
+    if end_idx < total_files:
+        nav_row.append(Button.inline("Next >", data=f"flist:{page + 1}".encode()))
+    if nav_row:
+        buttons.append(nav_row)
+
+    buttons.append([Button.inline("Refresh List", data=f"flist:{page}".encode())])
+    return buttons
+
+
+def build_file_action_menu(task_id: str, file_type: str) -> List[List[Button]]:
+    """Builds actions for a specific cached file: Recall or Delete."""
+    return [
+        [
+            Button.inline("Recall / Send to Me", data=f"recall:{file_type}:{task_id}".encode())
+        ],
+        [
+            Button.inline("Delete from Server", data=f"del_f:{file_type}:{task_id}".encode())
+        ],
+        [
+            Button.inline("< Back to Files List", data=b"flist:0")
+        ]
+    ]
+
+
+def build_recall_progress_menu(recall_id: str) -> List[List[Button]]:
+    """Builds progress keyboard with Stop Sending button."""
+    return [
+        [
+            Button.inline("Stop Sending", data=f"stop_rec:{recall_id}".encode())
+        ]
+    ]
+
+
+def build_confirm_stop_menu(recall_id: str) -> List[List[Button]]:
+    """Builds confirmation keyboard to verify user wants to stop transfer."""
+    return [
+        [
+            Button.inline("Yes, Stop Sending", data=f"yes_stop:{recall_id}".encode()),
+            Button.inline("No, Continue Sending", data=f"no_stop:{recall_id}".encode())
+        ]
+    ]

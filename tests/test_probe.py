@@ -66,13 +66,13 @@ def test_format_time_breakdown():
         total_pipeline_time=21.1,
         total_overall_time=32.6
     )
-    assert "*Time Details:*" in res
-    assert "Receive & Download: `4.2s`" in res
-    assert "Media Analysis: `0.3s`" in res
-    assert "Transcode / Processing: `11.5s`" in res
-    assert "Upload to Telegram: `5.1s`" in res
-    assert "Total Active Pipeline: `21.1s`" in res
-    assert "Total Overall Time: `32.6s`" in res
+    assert "**Time Details:**" in res
+    assert "• **Receive & Download:** `4.2s`" in res
+    assert "• **Media Analysis:** `0.3s`" in res
+    assert "• **Transcode / Processing:** `11.5s`" in res
+    assert "• **Upload to Telegram:** `5.1s`" in res
+    assert "• **Total Active Pipeline:** `21.1s`" in res
+    assert "• **Total Overall Time:** `32.6s`" in res
 
 
 def test_format_before_after_analysis(sample_video: Path):

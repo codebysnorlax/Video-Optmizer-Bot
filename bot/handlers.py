@@ -6,7 +6,13 @@ from telethon import events
 from config.settings import settings
 from core.hardware import current_hardware
 from core.probe import format_bytes
-from database.models import upsert_user, get_user_stats, get_user_recent_tasks
+from database.models import (
+    upsert_user,
+    get_user_stats,
+    get_user_recent_tasks,
+    get_user_cached_files
+)
+from bot.keyboards import build_files_list_menu
 
 
 async def handle_start(event: events.NewMessage.Event) -> None:
@@ -15,18 +21,20 @@ async def handle_start(event: events.NewMessage.Event) -> None:
     await upsert_user(event.sender_id, getattr(user, "username", ""), getattr(user, "first_name", ""))
 
     text = (
-        "*Welcome to the Video Optimizer & Converter Bot*\n\n"
-        "Send or forward *any video format* to get started. The bot will analyze it and provide options:\n\n"
-        "*1. Optimize:*\n"
+        "**Welcome to the Video Optimizer & Converter Bot**\n\n"
+        "Send or forward **any video format** to get started. The bot will analyze it and provide options:\n\n"
+        "**1. Optimize:**\n"
         " • `Low Device`: Max playback compatibility on older phones and TVs\n"
         " • `Moderate`: Balanced quality with mid-range bitrate\n"
-        " • `Auto Recommended`: Smart analyzer that fixes raw camera bitrate bloat (e.g. 500MB -> 18MB) with zero perceptual quality loss\n\n"
-        "*2. Convert:*\n"
+        " • `Auto Recommended`: Smart analyzer that fixes camera bitrate bloat (e.g. 500MB -> 18MB) with zero perceptual quality loss\n\n"
+        "**2. Convert & Audio Fix:**\n"
+        " • `Fix Audio`: Fast untouched stream copy with universal stereo AAC for smartphones\n"
         " • Transcode to MP4, MKV, WEBM, AVI, MOV, MPG\n"
         " • Extract audio to MP3, AAC, OGG, WAV\n\n"
-        "*3. AI Manual (Coming Soon)*\n\n"
-        "*Engine:* Powered by `" + current_hardware.description + "`\n\n"
-        "*Drop or forward a video here to begin!*"
+        "**3. Manage Cached Files:**\n"
+        " • Use `/files` to view, recall (re-download), or delete server cached videos\n\n"
+        f"**Engine:** Powered by `{current_hardware.description}`\n\n"
+        "**Drop or forward a video here to begin!**"
     )
     await event.reply(text)
 
@@ -34,20 +42,23 @@ async def handle_start(event: events.NewMessage.Event) -> None:
 async def handle_help(event: events.NewMessage.Event) -> None:
     """Handles /help command."""
     text = (
-        "*How to use Video Optimizer Bot:*\n\n"
-        "1. *Send any video:* Up to 2,000 MB (2 GB) supported!\n"
-        "2. *Review Analysis:* The bot immediately inspects resolution, duration, codecs, and bitrate.\n"
-        "3. *Select Action:*\n"
-        "   - *Optimize (Auto Recommended):* Best for camera videos where 40s takes 500MB. Shrinks file size up to 95% with pristine quality.\n"
-        "   - *Optimize (Low Device):* Guarantees smooth playback on budget phones and older TVs.\n"
-        "   - *Optimize (Moderate):* Balanced crisp profile.\n"
-        "   - *Convert:* Transcode video containers or extract high-quality audio.\n"
-        "4. *Live Progress:* Watch download, transcoding, and upload progress in real-time.\n"
-        "5. *Manage Server Cache:* Prompt to delete or keep the server copy to save disk space.\n\n"
-        "*Commands:*\n"
+        "**How to use Video Optimizer Bot:**\n\n"
+        "1. **Send any video:** Up to 2,000 MB (2 GB) supported!\n"
+        "2. **Review Analysis:** The bot immediately inspects resolution, duration, codecs, and bitrate.\n"
+        "3. **Select Action:**\n"
+        "   - **Optimize (Auto Recommended):** Best for camera videos. Shrinks file size up to 95% with pristine quality.\n"
+        "   - **Optimize (Low Device):** Guarantees smooth playback on budget phones and older TVs.\n"
+        "   - **Optimize (Moderate):** Balanced crisp profile.\n"
+        "   - **Fix Audio (Smartphone AAC):** Untouched video copy + universal AAC stereo fix in ~1s.\n"
+        "   - **Convert:** Transcode video containers or extract high-quality audio.\n"
+        "4. **Live Progress:** Watch download, transcoding, and upload progress in real-time.\n"
+        "5. **Manage Server Files:** Use `/files` to view, recall, or permanently delete server files.\n\n"
+        "**Commands:**\n"
+        "• `/files` - View, recall, or delete server cached files\n"
         "• `/stats` - View your total saved bandwidth and usage\n"
         "• `/hardware` - View host hardware acceleration & system info\n"
-        "• `/history` - View your recent tasks"
+        "• `/history` - View your recent tasks\n"
+        "• `/storage` - Check host disk space & active cache"
     )
     await event.reply(text)
 
@@ -56,16 +67,16 @@ async def handle_hardware(event: events.NewMessage.Event) -> None:
     """Handles /hardware diagnostics command."""
     disk = settings.get_disk_usage()
     text = (
-        "*Host Hardware & Platform Diagnostics*\n\n"
-        f"*OS:* `{current_hardware.os_name}`\n"
-        f"*Architecture:* `{current_hardware.arch}`\n"
-        f"*Termux Mobile Server:* `{'Yes' if current_hardware.is_termux else 'No'}`\n"
-        f"*CPU Model:* `{current_hardware.cpu_model}`\n"
-        f"*CPU Cores:* `{current_hardware.cpu_cores} active threads`\n"
-        f"*RAM Usage:* `{current_hardware.available_ram_mb} MB free / {current_hardware.total_ram_mb} MB total`\n"
-        f"*Hardware Acceleration:* `{current_hardware.description}`\n"
-        f"*Primary Codec:* `{current_hardware.video_encoder}`\n\n"
-        f"*Server Storage:* `{disk['free_gb']} GB free / {disk['total_gb']} GB total` ({disk['percent_used']}% used)"
+        "**Host Hardware & Platform Diagnostics**\n\n"
+        f"• **OS:** `{current_hardware.os_name}`\n"
+        f"• **Architecture:** `{current_hardware.arch}`\n"
+        f"• **Termux Mobile Server:** `{'Yes' if current_hardware.is_termux else 'No'}`\n"
+        f"• **CPU Model:** `{current_hardware.cpu_model}`\n"
+        f"• **CPU Cores:** `{current_hardware.cpu_cores} active threads`\n"
+        f"• **RAM Usage:** `{current_hardware.available_ram_mb} MB free / {current_hardware.total_ram_mb} MB total`\n"
+        f"• **Hardware Acceleration:** `{current_hardware.description}`\n"
+        f"• **Primary Codec:** `{current_hardware.video_encoder}`\n\n"
+        f"• **Server Storage:** `{disk['free_gb']} GB free / {disk['total_gb']} GB total` ({disk['percent_used']}% used)"
     )
     await event.reply(text)
 
@@ -86,13 +97,13 @@ async def handle_stats(event: events.NewMessage.Event) -> None:
     ratio = (saved_bytes / in_bytes * 100) if in_bytes > 0 else 0
 
     text = (
-        "*Your Video Optimization Statistics*\n\n"
-        f"*Total Tasks:* `{total_tasks}` (`{successful}` completed)\n"
-        f"*Total Input Data:* `{format_bytes(in_bytes)}`\n"
-        f"*Total Output Data:* `{format_bytes(out_bytes)}`\n"
-        f"*Total Bandwidth Saved:* `{format_bytes(saved_bytes)}` ({ratio:.1f}%)\n"
-        f"*Average Processing Time:* `{avg_time:.1f}s`\n\n"
-        f"*Server Disk Status:* `{disk['free_gb']} GB free / {disk['total_gb']} GB total`"
+        "**Your Video Optimization Statistics**\n\n"
+        f"• **Total Tasks:** `{total_tasks}` (`{successful}` completed)\n"
+        f"• **Total Input Data:** `{format_bytes(in_bytes)}`\n"
+        f"• **Total Output Data:** `{format_bytes(out_bytes)}`\n"
+        f"• **Total Bandwidth Saved:** `{format_bytes(saved_bytes)}` ({ratio:.1f}%)\n"
+        f"• **Average Processing Time:** `{avg_time:.1f}s`\n\n"
+        f"• **Server Disk Status:** `{disk['free_gb']} GB free / {disk['total_gb']} GB total`"
     )
     await event.reply(text)
 
@@ -106,13 +117,13 @@ async def handle_history(event: events.NewMessage.Event) -> None:
         await event.reply("You have no processing history yet. Send a video to get started.")
         return
 
-    lines = ["*Your Recent Processing History:*\n"]
+    lines = ["**Your Recent Processing History:**\n"]
     for t in tasks:
         status_tag = "[OK]" if t['status'] == "completed" else "[FAILED]"
         lines.append(
-            f"{status_tag} *{t['file_name']}*\n"
-            f"   • Action: `{t['action']}` | Date: `{t['created_at']}`\n"
-            f"   • Size: `{format_bytes(t['input_size'])}` -> `{format_bytes(t['output_size'])}`"
+            f"{status_tag} **{t['file_name']}**\n"
+            f"   • **Action:** `{t['action']}` | **Date:** `{t['created_at']}`\n"
+            f"   • **Size:** `{format_bytes(t['input_size'])}` -> `{format_bytes(t['output_size'])}`"
         )
     await event.reply("\n".join(lines))
 
@@ -123,13 +134,40 @@ async def handle_storage(event: events.NewMessage.Event) -> None:
     dl_size = sum(f.stat().st_size for f in settings.DOWNLOAD_DIR.glob("*") if f.is_file())
     out_size = sum(f.stat().st_size for f in settings.OUTPUT_DIR.glob("*") if f.is_file())
     text = (
-        "*Server Storage Diagnostics*\n\n"
-        f"*Free Space:* `{disk['free_gb']} GB free`\n"
-        f"*Total Space:* `{disk['total_gb']} GB total`\n"
-        f"*Used Space:* `{disk['used_gb']} GB` ({disk['percent_used']}% used)\n\n"
-        f"*Active Temporary Cache:*\n"
+        "**Server Storage Diagnostics**\n\n"
+        f"• **Free Space:** `{disk['free_gb']} GB free`\n"
+        f"• **Total Space:** `{disk['total_gb']} GB total`\n"
+        f"• **Used Space:** `{disk['used_gb']} GB` ({disk['percent_used']}% used)\n\n"
+        "**Active Temporary Cache:**\n"
         f"• Downloads folder: `{format_bytes(dl_size)}`\n"
         f"• Outputs folder: `{format_bytes(out_size)}`\n\n"
-        "Storage is automatically managed with step-by-step deletion prompts after each video."
+        "Use `/files` to view, recall, or delete individual cached files."
     )
     await event.reply(text)
+
+
+async def handle_files(event: events.NewMessage.Event) -> None:
+    """Handles /files command to view, recall, and delete server cached files."""
+    user_id = event.sender_id
+    files = await get_user_cached_files(user_id)
+    disk = settings.get_disk_usage()
+
+    if not files:
+        text = (
+            "**Server Cached Files**\n\n"
+            "You have no active files currently cached on the server.\n"
+            "All past files have either been deleted or cleaned up.\n\n"
+            f"• **Server Free Space:** `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)"
+        )
+        await event.reply(text)
+        return
+
+    total_size = sum(f["size"] for f in files)
+    text = (
+        f"**Server Cached Files ({len(files)} stored)**\n\n"
+        f"• **Total Cache Stored:** `{format_bytes(total_size)}`\n"
+        f"• **Server Free Space:** `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
+        "Select any file below to **Recall** (send back to you) or **Delete** from server:"
+    )
+    menu = build_files_list_menu(files, page=0)
+    await event.reply(text, buttons=menu)
