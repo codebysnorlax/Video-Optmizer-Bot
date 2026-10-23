@@ -199,7 +199,7 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             f"**Current Server Free Space:** `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
             "All set! Ready for your next video."
         )
-        await event.edit(final_text)
+        await event.edit(final_text, buttons=None)
         await event.answer(alert_msg, alert=False)
         return
 
@@ -649,18 +649,47 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
 
             # Absolute Failsafe: An optimizer must NEVER deliver an output larger than the input!
             if out_size >= meta.file_size_bytes:
-                term_log("PROCESS", f"Output ({format_bytes(out_size)}) was >= input ({format_bytes(meta.file_size_bytes)}). Protecting user by keeping original stream.", task_id=task_id)
-                fallback_out = settings.OUTPUT_DIR / f"{task_id}_opt_fast_{task_ctx.input_path.name}"
-                cmd_fallback = [
-                    "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                term_log("PROCESS", f"Initial output ({format_bytes(out_size)}) >= input ({format_bytes(meta.file_size_bytes)}). Running second-pass safe bitrate compression.", task_id=task_id)
+                dur = max(meta.duration_seconds, 1.0)
+                safe_kbps = max(200, int((meta.file_size_bytes * 8 * 0.65) / (dur * 1000)))
+                safe_maxrate = safe_kbps
+                safe_bufsize = safe_kbps * 2
+
+                cap_dim = 720 if mode == "low" else 1080
+                scale_part = VideoOptimizer.get_scale_filter(meta, cap_dim)
+                fps_part = VideoOptimizer.get_fps_filter(meta, 60.0)
+                filters = [f for f in [scale_part, fps_part, "format=yuv420p"] if f]
+                vf_arg = ",".join(filters)
+
+                fallback_out = settings.OUTPUT_DIR / f"{task_id}_safe_{task_ctx.input_path.stem}.mp4"
+                cmd_safe = [
                     "-i", str(task_ctx.input_path),
-                    "-c", "copy",
-                    "-movflags", "+faststart",
-                    str(fallback_out)
+                    "-c:v", "libx264",
+                    "-preset", "veryfast",
+                    "-b:v", f"{safe_kbps}k",
+                    "-maxrate", f"{safe_maxrate}k",
+                    "-bufsize", f"{safe_bufsize}k",
+                    "-threads", str(current_hardware.cpu_cores),
                 ]
-                proc = await asyncio.create_subprocess_exec(*cmd_fallback)
-                await proc.wait()
-                if fallback_out.exists():
+                if vf_arg:
+                    cmd_safe.extend(["-vf", vf_arg])
+                if meta.has_audio:
+                    cmd_safe.extend(["-c:a", "aac", "-b:a", "128k", "-ac", "2"])
+                else:
+                    cmd_safe.extend(["-an"])
+                cmd_safe.extend(["-movflags", "+faststart", str(fallback_out)])
+
+                try:
+                    await run_ffmpeg_with_progress(
+                        cmd=cmd_safe,
+                        total_duration_seconds=meta.duration_seconds,
+                        progress_callback=transcode_progress,
+                        progress_interval=0.2
+                    )
+                except Exception as e:
+                    logger.warning(f"Safe second pass transcode failed: {e}")
+
+                if fallback_out.exists() and os.path.getsize(fallback_out) < meta.file_size_bytes:
                     try:
                         out_path.unlink()
                     except Exception:
@@ -668,7 +697,27 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                     out_path = fallback_out
                     task_ctx.output_path = out_path
                     out_size = os.path.getsize(out_path)
-                    explanation = " • Original video was already at maximum compression.\n • Preserved original pristine stream with FastStart enabled for instant streaming."
+                    explanation += f"\n • Applied safe bitrate constraint ({safe_kbps} kbps) ensuring strictly reduced size."
+                else:
+                    # Last resort fallback: FastStart stream copy
+                    cmd_fallback = [
+                        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                        "-i", str(task_ctx.input_path),
+                        "-c", "copy",
+                        "-movflags", "+faststart",
+                        str(fallback_out)
+                    ]
+                    proc = await asyncio.create_subprocess_exec(*cmd_fallback)
+                    await proc.wait()
+                    if fallback_out.exists():
+                        try:
+                            out_path.unlink()
+                        except Exception:
+                            pass
+                        out_path = fallback_out
+                        task_ctx.output_path = out_path
+                        out_size = os.path.getsize(out_path)
+                        explanation = " • Original video was already at maximum compression.\n • Preserved original pristine stream with FastStart enabled for instant streaming."
 
             # Register in file cache
             await register_file_cache(

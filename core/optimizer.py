@@ -8,6 +8,7 @@ Strict High-to-Low Invariant:
 - Resolution: NEVER upscales (e.g. 420p or 360p is strictly preserved as native 420p/360p). Only downscales if larger than mode cap.
 - Framerate: NEVER upsamples (e.g. 24fps or 30fps is strictly preserved). Only downsamples if > 60 fps.
 - Bitrate: NEVER increases (target cap is strictly below source bitrate).
+- Rate Control: Employs multi-threaded libx264 with strict VBV -maxrate and -bufsize to guarantee size reduction.
 - Audio: Untouched copy if already AAC; never bloats audio bitrate.
 """
 
@@ -78,7 +79,7 @@ class VideoOptimizer:
         - Resolution: Downscales to 720p ONLY if larger than 720p; NEVER upscales (e.g. 420p stays 420p).
         - Framerate: Caps at 60 fps ONLY if source > 60 fps; NEVER upsamples (e.g. 30fps stays 30fps).
         - Bitrate: Compresses very high bitrates to moderate (max 2000k), strictly lower than source.
-        - Codec: H.264 Main profile YUV420p for older & budget devices.
+        - Codec: H.264 Main profile YUV420p with strict VBV rate control.
         - Audio: Untouched copy if AAC; otherwise normalizes to AAC stereo.
         """
         src_br = VideoOptimizer.get_source_video_bitrate(meta)
@@ -108,32 +109,21 @@ class VideoOptimizer:
 
         explanation.append(f"Reduced stream density ({src_br} kbps -> {max_br} kbps cap, strictly reduced)")
 
-        # Hardware vs CPU handling
-        if hw.hwaccel_type == "vaapi" and hw.hwaccel_device:
-            vf_filters.append("format=nv12,hwupload")
-            cmd.extend([
-                "-init_hw_device", f"vaapi=va:{hw.hwaccel_device}",
-                "-filter_hw_device", "va",
-                "-vf", ",".join(vf_filters) if vf_filters else "format=nv12,hwupload",
-                "-c:v", "h264_vaapi",
-                "-qp", "26"
-            ])
-            explanation.append("Accelerated via Hardware GPU (Intel VAAPI)")
-        else:
-            if vf_filters:
-                cmd.extend(["-vf", ",".join(vf_filters)])
-            cmd.extend([
-                "-c:v", "libx264",
-                "-profile:v", "main",
-                "-level", "4.0",
-                "-preset", "veryfast" if hw.is_termux else "fast",
-                "-crf", "24",
-                "-maxrate", f"{max_br}k",
-                "-bufsize", f"{buf_size}k",
-                "-pix_fmt", "yuv420p",
-                "-threads", str(hw.cpu_cores)
-            ])
-            explanation.append(f"Processed via Multi-Threaded Engine ({hw.cpu_cores} cores)")
+        if vf_filters:
+            cmd.extend(["-vf", ",".join(vf_filters)])
+
+        cmd.extend([
+            "-c:v", "libx264",
+            "-profile:v", "main",
+            "-level", "4.0",
+            "-preset", "veryfast",
+            "-crf", "24",
+            "-maxrate", f"{max_br}k",
+            "-bufsize", f"{buf_size}k",
+            "-pix_fmt", "yuv420p",
+            "-threads", str(hw.cpu_cores)
+        ])
+        explanation.append(f"Processed via Multi-Threaded Engine ({hw.cpu_cores} cores)")
 
         # Audio settings: preserve untouched if already AAC, otherwise convert without inflating
         if meta.has_audio:
@@ -164,7 +154,7 @@ class VideoOptimizer:
         - Resolution: Downscales to 1080p ONLY if larger than 1080p; NEVER upscales (e.g. 720p or 420p stays native).
         - Framerate: Caps at 60 fps ONLY if source > 60 fps; NEVER upsamples.
         - Bitrate: Compresses high bitrate bloat to ~2800k-3200k max, strictly lower than source.
-        - Codec: H.264 High profile YUV420p.
+        - Codec: H.264 High profile YUV420p with strict VBV rate control.
         - Audio: Untouched copy if AAC; otherwise normalizes to AAC stereo 160k.
         """
         src_br = VideoOptimizer.get_source_video_bitrate(meta)
@@ -194,31 +184,21 @@ class VideoOptimizer:
 
         explanation.append(f"Optimized stream density for mid-range devices ({src_br} kbps -> {max_br} kbps cap)")
 
-        if hw.hwaccel_type == "vaapi" and hw.hwaccel_device:
-            vf_filters.append("format=nv12,hwupload")
-            cmd.extend([
-                "-init_hw_device", f"vaapi=va:{hw.hwaccel_device}",
-                "-filter_hw_device", "va",
-                "-vf", ",".join(vf_filters) if vf_filters else "format=nv12,hwupload",
-                "-c:v", "h264_vaapi",
-                "-qp", "24"
-            ])
-            explanation.append("Accelerated via Hardware GPU (Intel VAAPI)")
-        else:
-            if vf_filters:
-                cmd.extend(["-vf", ",".join(vf_filters)])
-            cmd.extend([
-                "-c:v", "libx264",
-                "-profile:v", "high",
-                "-level", "4.1",
-                "-preset", "veryfast" if hw.is_termux else "fast",
-                "-crf", "22",
-                "-maxrate", f"{max_br}k",
-                "-bufsize", f"{buf_size}k",
-                "-pix_fmt", "yuv420p",
-                "-threads", str(hw.cpu_cores)
-            ])
-            explanation.append(f"Processed via Multi-Threaded Engine ({hw.cpu_cores} cores)")
+        if vf_filters:
+            cmd.extend(["-vf", ",".join(vf_filters)])
+
+        cmd.extend([
+            "-c:v", "libx264",
+            "-profile:v", "high",
+            "-level", "4.1",
+            "-preset", "veryfast",
+            "-crf", "22",
+            "-maxrate", f"{max_br}k",
+            "-bufsize", f"{buf_size}k",
+            "-pix_fmt", "yuv420p",
+            "-threads", str(hw.cpu_cores)
+        ])
+        explanation.append(f"Processed via Multi-Threaded Engine ({hw.cpu_cores} cores)")
 
         # Audio settings: preserve untouched if already AAC, otherwise convert without inflating
         if meta.has_audio:
@@ -288,32 +268,21 @@ class VideoOptimizer:
             explanation.append(f"Optimized stream density ({src_br} kbps -> {max_br} kbps cap, strictly reduced)")
             target_crf = 23
 
-        # 4. Video Encoder Selection
-        if hw.hwaccel_type == "vaapi" and hw.hwaccel_device:
-            vf_filters.append("format=nv12,hwupload")
-            cmd.extend([
-                "-init_hw_device", f"vaapi=va:{hw.hwaccel_device}",
-                "-filter_hw_device", "va",
-                "-vf", ",".join(vf_filters) if vf_filters else "format=nv12,hwupload",
-                "-c:v", "h264_vaapi",
-                "-qp", "24"
-            ])
-            explanation.append("Accelerated via Hardware GPU (Intel VAAPI)")
-        else:
-            if vf_filters:
-                cmd.extend(["-vf", ",".join(vf_filters)])
-            cmd.extend([
-                "-c:v", "libx264",
-                "-profile:v", "high",
-                "-level", "4.1",
-                "-preset", "veryfast" if hw.is_termux else "fast",
-                "-crf", str(target_crf),
-                "-maxrate", f"{max_br}k",
-                "-bufsize", f"{buf_size}k",
-                "-pix_fmt", "yuv420p",
-                "-threads", str(hw.cpu_cores)
-            ])
-            explanation.append(f"Processed via Multi-Threaded Engine ({hw.cpu_cores} cores)")
+        if vf_filters:
+            cmd.extend(["-vf", ",".join(vf_filters)])
+
+        cmd.extend([
+            "-c:v", "libx264",
+            "-profile:v", "high",
+            "-level", "4.1",
+            "-preset", "veryfast",
+            "-crf", str(target_crf),
+            "-maxrate", f"{max_br}k",
+            "-bufsize", f"{buf_size}k",
+            "-pix_fmt", "yuv420p",
+            "-threads", str(hw.cpu_cores)
+        ])
+        explanation.append(f"Processed via Multi-Threaded Engine ({hw.cpu_cores} cores)")
 
         # 5. Audio Compatibility Check
         if meta.has_audio:

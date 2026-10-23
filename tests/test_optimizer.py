@@ -276,3 +276,60 @@ async def test_converter_modes(sample_media: Path, tmp_path: Path):
     assert "-c:a" in cmd
     assert "aac" in cmd
     assert "192k" in cmd
+
+
+def test_4k_vertical_downscaling():
+    """Verify that a 4K 60fps vertical video (2160x3840) downscales correctly to 720p and 1080p with strict VBV rate control."""
+    meta_4k = MediaMetadata(
+        file_path=Path("/tmp/fake_4k.mp4"),
+        file_name="douyin_4k.mp4",
+        file_size_bytes=7800000,
+        duration_seconds=11.0,
+        container_format="mp4",
+        has_video=True,
+        video_codec="hevc",
+        width=2160,
+        height=3840,
+        fps=60.0,
+        video_bitrate_kbps=5857,
+        has_audio=True,
+        audio_codec="aac",
+        audio_channels=2,
+        audio_sample_rate=44100,
+        audio_bitrate_kbps=128,
+        overall_bitrate_kbps=5857,
+        is_high_bitrate=False,
+        raw_info={}
+    )
+    out_file = Path("/tmp/out.mp4")
+
+    # 1. Low Device Mode (must downscale to 720p cap with scale=720:-2 and maxrate <= 2000k)
+    cmd_low, exp_low = VideoOptimizer.build_low_device_args(meta_4k, out_file)
+    assert "-vf" in cmd_low
+    vf_idx = cmd_low.index("-vf")
+    assert "scale=720:-2" in cmd_low[vf_idx + 1]
+    assert "-maxrate" in cmd_low
+    maxrate_idx = cmd_low.index("-maxrate")
+    assert int(cmd_low[maxrate_idx + 1].replace("k", "")) <= 2000
+    assert "-preset" in cmd_low
+    assert cmd_low[cmd_low.index("-preset") + 1] == "veryfast"
+    assert "720p HD cap" in exp_low
+
+    # 2. Moderate Mode (must downscale to 1080p cap with scale=1080:-2 and maxrate <= 2800k)
+    cmd_mod, exp_mod = VideoOptimizer.build_moderate_args(meta_4k, out_file)
+    assert "-vf" in cmd_mod
+    vf_idx = cmd_mod.index("-vf")
+    assert "scale=1080:-2" in cmd_mod[vf_idx + 1]
+    assert "-preset" in cmd_mod
+    assert cmd_mod[cmd_mod.index("-preset") + 1] == "veryfast"
+    assert "1080p FHD cap" in exp_mod
+
+    # 3. Auto Recommended Mode (must downscale to 1080p cap with scale=1080:-2)
+    cmd_auto, exp_auto = VideoOptimizer.build_auto_recommended_args(meta_4k, out_file)
+    assert "-vf" in cmd_auto
+    vf_idx = cmd_auto.index("-vf")
+    assert "scale=1080:-2" in cmd_auto[vf_idx + 1]
+    assert "-preset" in cmd_auto
+    assert cmd_auto[cmd_auto.index("-preset") + 1] == "veryfast"
+    assert "1080p FHD" in exp_auto
+

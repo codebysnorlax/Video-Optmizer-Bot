@@ -93,6 +93,13 @@ def create_bot_client() -> TelegramClient:
     # Register Callback Query Listener
     @client.on(events.CallbackQuery())
     async def _callback(event):
-        await handle_callback_query(event, client)
+        try:
+            await handle_callback_query(event, client)
+        except Exception as e:
+            from telethon.errors import MessageNotModifiedError
+            if isinstance(e, MessageNotModifiedError):
+                return
+            logger.error(f"Unhandled callback error: {e}", exc_info=True)
 
     return client
+
