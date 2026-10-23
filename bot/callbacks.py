@@ -88,9 +88,9 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         menu = build_optimize_menu(task_id)
         text = (
             "**Select Optimization Mode:**\n\n"
-            "**1. Low Device (Max Compatibility):** Scales to 720p max (preserves <=720p), caps FPS at 60, moderates high bitrates for older & budget phones.\n"
-            "**2. Moderate (Mid-Range Device):** Scales to 1080p max (preserves <=1080p), caps FPS at 60, optimizes bitrate (~3 Mbps) for smooth mid-range smartphone playback.\n"
-            "**3. Auto Recommended (Smart Fix):** Universal smartphone compatibility, downscales 4K/2K to 1080p, fixes audio issues, caps FPS at 60, strictly reduces file size."
+            "**1. Low Device (Max Compatibility):** Downscales >720p to 720p (never upscales <=720p), caps >60fps at 60fps (never upsamples), moderates high bitrates for older & budget phones.\n"
+            "**2. Moderate (Mid-Range Device):** Downscales >1080p to 1080p (never upscales <=1080p), caps >60fps at 60fps, optimizes bitrate for smooth mid-range smartphone playback.\n"
+            "**3. Auto Recommended (Smart Fix):** Universal smartphone compatibility, downscales >1080p to 1080p (never upscales), fixes audio issues, strictly reduces file size."
         )
         await event.edit(text, buttons=menu)
         return
@@ -608,9 +608,9 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
             # Build optimization arguments
             explanation = ""
             if mode == "low":
-                cmd = VideoOptimizer.build_low_device_args(meta, out_path, current_hardware)
+                cmd, explanation = VideoOptimizer.build_low_device_args(meta, out_path, current_hardware)
             elif mode == "mod":
-                cmd = VideoOptimizer.build_moderate_args(meta, out_path, current_hardware)
+                cmd, explanation = VideoOptimizer.build_moderate_args(meta, out_path, current_hardware)
             else:
                 cmd, explanation = VideoOptimizer.build_auto_recommended_args(meta, out_path, current_hardware)
 

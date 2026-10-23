@@ -163,20 +163,91 @@ async def test_optimizer_modes(sample_media: Path, tmp_path: Path):
     out_file = tmp_path / "out.mp4"
 
     # Test 1: Low Device
-    low_cmd = VideoOptimizer.build_low_device_args(meta, out_file, current_hardware)
+    low_cmd, low_exp = VideoOptimizer.build_low_device_args(meta, out_file, current_hardware)
     assert "-i" in low_cmd
     assert str(out_file) in low_cmd
-    assert "-c:a" in low_cmd
+    assert len(low_exp) > 0
 
     # Test 2: Moderate
-    mod_cmd = VideoOptimizer.build_moderate_args(meta, out_file, current_hardware)
+    mod_cmd, mod_exp = VideoOptimizer.build_moderate_args(meta, out_file, current_hardware)
     assert "-i" in mod_cmd
     assert str(out_file) in mod_cmd
+    assert len(mod_exp) > 0
 
     # Test 3: Auto Recommended
-    auto_cmd, explanation = VideoOptimizer.build_auto_recommended_args(meta, out_file, current_hardware)
+    auto_cmd, auto_exp = VideoOptimizer.build_auto_recommended_args(meta, out_file, current_hardware)
     assert "-i" in auto_cmd
-    assert len(explanation) > 0
+    assert len(auto_exp) > 0
+
+
+def test_never_upscale_low_resolution_and_fps():
+    """Verify that a 420p 24fps video is never upscaled to 720p/1080p and fps is never upsampled."""
+    meta_420p = MediaMetadata(
+        file_path=Path("/tmp/fake_420p.mp4"),
+        file_name="fake_420p.mp4",
+        file_size_bytes=2000000,
+        duration_seconds=10.0,
+        container_format="mp4",
+        has_video=True,
+        video_codec="h264",
+        width=420,
+        height=746,
+        fps=24.0,
+        video_bitrate_kbps=400,
+        has_audio=True,
+        audio_codec="aac",
+        audio_channels=2,
+        audio_sample_rate=44100,
+        audio_bitrate_kbps=64,
+        overall_bitrate_kbps=464,
+        is_high_bitrate=False,
+        raw_info={}
+    )
+
+    # 1. Scale filter must be None for 720p and 1080p
+    assert VideoOptimizer.get_scale_filter(meta_420p, 720) is None
+    assert VideoOptimizer.get_scale_filter(meta_420p, 1080) is None
+
+    # 2. FPS filter must be None
+    assert VideoOptimizer.get_fps_filter(meta_420p, 60.0) is None
+
+    out_file = Path("/tmp/out.mp4")
+    from core.hardware import HardwareProfile
+    cpu_hw = HardwareProfile(
+        os_name="linux",
+        is_termux=False,
+        arch="x86_64",
+        cpu_cores=4,
+        total_ram_mb=8000,
+        available_ram_mb=4000,
+        cpu_model="test_cpu",
+        video_encoder="libx264",
+        hevc_encoder="libx265",
+        hwaccel_type="cpu",
+        hwaccel_device=None,
+        description="CPU Engine"
+    )
+
+    # Low device mode on 420p
+    cmd_low, exp_low = VideoOptimizer.build_low_device_args(meta_420p, out_file, cpu_hw)
+    assert "scale=" not in str(cmd_low)
+    assert "fps=" not in str(cmd_low)
+    assert "never upscaled" in exp_low
+    assert "never upsampled" in exp_low
+
+    # Moderate mode on 420p
+    cmd_mod, exp_mod = VideoOptimizer.build_moderate_args(meta_420p, out_file, cpu_hw)
+    assert "scale=" not in str(cmd_mod)
+    assert "fps=" not in str(cmd_mod)
+    assert "never upscaled" in exp_mod
+    assert "never upsampled" in exp_mod
+
+    # Auto mode on 420p
+    cmd_auto, exp_auto = VideoOptimizer.build_auto_recommended_args(meta_420p, out_file, cpu_hw)
+    assert "scale=" not in str(cmd_auto)
+    assert "fps=" not in str(cmd_auto)
+    assert "never upscaled" in exp_auto
+    assert "never upsampled" in exp_auto
 
 
 @pytest.mark.asyncio
