@@ -1,0 +1,13 @@
+aiosqlite==0.22.1
+iniconfig==2.3.1
+packaging==26.3
+pluggy==1.7.0
+psutil==7.2.2
+pyaes==1.6.1
+pyasn1==0.6.4
+Pygments==2.21.0
+pytest==9.1.1
+pytest-asyncio==1.4.0
+python-dotenv==1.2.4
+rsa==4.9.1
+Telethon==1.45.0

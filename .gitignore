@@ -1,0 +1,31 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+env/
+venv/
+ENV/
+
+# Telethon & Session files
+*.session
+*.session-journal
+
+# Database
+database/*.db
+database/*.db-journal
+
+# Storage & temp media
+storage/downloads/*
+!storage/downloads/.gitkeep
+storage/outputs/*
+!storage/outputs/.gitkeep
+
+# Environment variables
+.env
+
+# Testing & Logs
+.pytest_cache/
+*.log

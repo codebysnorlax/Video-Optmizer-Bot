@@ -1,0 +1,60 @@
+"""
+Telethon MTProto Client Initialization & Event Dispatcher
+"""
+
+import logging
+from telethon import TelegramClient, events
+from config.settings import settings
+from bot.handlers import handle_start, handle_help, handle_hardware, handle_stats, handle_history
+from bot.media_handler import handle_incoming_media, is_video_message
+from bot.callbacks import handle_callback_query
+
+logger = logging.getLogger(__name__)
+
+
+def create_bot_client() -> TelegramClient:
+    """Creates and configures the Telethon client in Bot mode."""
+    session_name = "optimizer_bot_session"
+
+    client = TelegramClient(
+        session_name,
+        api_id=settings.TELEGRAM_API_ID,
+        api_hash=settings.TELEGRAM_API_HASH
+    )
+
+    # Register Slash Commands
+    @client.on(events.NewMessage(pattern=r"^/start$"))
+    async def _start(event):
+        await handle_start(event)
+
+    @client.on(events.NewMessage(pattern=r"^/help$"))
+    async def _help(event):
+        await handle_help(event)
+
+    @client.on(events.NewMessage(pattern=r"^/hardware$"))
+    async def _hardware(event):
+        await handle_hardware(event)
+
+    @client.on(events.NewMessage(pattern=r"^/stats$"))
+    async def _stats(event):
+        await handle_stats(event)
+
+    @client.on(events.NewMessage(pattern=r"^/history$"))
+    async def _history(event):
+        await handle_history(event)
+
+    # Register Incoming Media Listener
+    @client.on(events.NewMessage())
+    async def _media(event):
+        # Ignore commands
+        if event.raw_text and event.raw_text.startswith("/"):
+            return
+        if is_video_message(event.message):
+            await handle_incoming_media(event, client)
+
+    # Register Callback Query Listener
+    @client.on(events.CallbackQuery())
+    async def _callback(event):
+        await handle_callback_query(event, client)
+
+    return client
