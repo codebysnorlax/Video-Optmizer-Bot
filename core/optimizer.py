@@ -236,24 +236,20 @@ class VideoOptimizer:
     ) -> Tuple[List[str], str]:
         """
         Mode 3: Auto Recommended (Smart Problem Detection & Universal Phone Playability)
-        - Resolution: Strictly preserves native resolution (4K stays 4K, 2K stays 2K, 1080p stays 1080p). NEVER downscales to 1080p!
-        - Framerate: Caps at 60 fps ONLY if source > 60 fps; NEVER upsamples.
-        - Stream Analysis: If the video is already smartphone-compatible (MP4 with HEVC/H.264 + AAC, <=8 Mbps),
-          preserves the pristine stream without generational loss and applies FastStart.
-        - If bitrate bloat (>8 Mbps) or non-mobile codec, optimizes density with best mobile quality.
-        - Enables +faststart for instantaneous streaming on all smartphones.
+        - Analyzes video stream for mobile bottlenecks (lag, stutter, incompatibility):
+          1. Resolution: Downscales heavy >1080p (4K/2K) to crisp 1080p FHD cap (eliminates 75% decoding strain and mobile lag).
+             NEVER upscales <=1080p (720p, 480p, 420p strictly stay native).
+          2. Framerate: Caps >60fps at 60fps for smooth hardware decoding without frame drops.
+          3. Bitrate & Quality: Optimizes stream density for butter-smooth mobile playback without quality degradation.
+          4. Hardware: Uses Intel VAAPI GPU acceleration for fastest hardware encoding.
+          5. FastStart: Enables +faststart for instant streaming buffer.
         Returns: (command_args, explanation_of_fix)
         """
         src_br = VideoOptimizer.get_source_video_bitrate(meta)
         explanation: List[str] = []
 
-        explanation.append(f"Preserved exact native {meta.resolution_label} resolution without downscaling (never upscaled)")
-
+        scale_f = VideoOptimizer.get_scale_filter(meta, 1080)
         fps_f = VideoOptimizer.get_fps_filter(meta, 60.0)
-        if fps_f:
-            explanation.append(f"Capped high framerate ({meta.fps:.0f} fps -> 60 fps) for smooth hardware decoding")
-        elif meta.fps:
-            explanation.append(f"Preserved native framerate ({meta.fps:.0f} fps, never upsampled)")
 
         v_codec = (meta.video_codec or "").lower()
         a_codec = (meta.audio_codec or "").lower()
@@ -264,12 +260,21 @@ class VideoOptimizer:
         is_mobile_acodec = a_codec == "aac"
         is_stereo_or_mono = meta.audio_channels in (1, 2) if meta.audio_channels else True
         is_moderate_bitrate = meta.overall_bitrate_kbps <= 8000
-        fps_ok = not fps_f
+        is_already_mobile_fit = (
+            scale_f is None
+            and fps_f is None
+            and is_mp4_family
+            and is_mobile_vcodec
+            and is_moderate_bitrate
+        )
 
-        # Ideal Stream Preservation: If already an efficient, smartphone-compatible stream, preserve pristine quality
-        if is_mp4_family and is_mobile_vcodec and is_moderate_bitrate and fps_ok:
+        if is_already_mobile_fit:
+            # Video is already <=1080p, <=60fps, compatible container/codec and moderate bitrate
             cmd = ["-i", str(meta.file_path), "-c:v", "copy"]
-            explanation.append(f"Verified universal smartphone playback compatibility ({v_codec.upper()} in MP4)")
+            explanation.append(f"Preserved native {meta.resolution_label} resolution (never upscaled, already lightweight & smooth for mobile screens)")
+            if meta.fps:
+                explanation.append(f"Preserved native framerate ({meta.fps:.0f} fps, never upsampled)")
+            explanation.append(f"Verified smartphone decoding compatibility ({v_codec.upper()} in MP4)")
             explanation.append(f"Preserved pristine stream with zero compression loss ({src_br} kbps)")
 
             if meta.has_audio:
@@ -288,33 +293,47 @@ class VideoOptimizer:
             summary_explanation = " • " + "\n • ".join(explanation)
             return cmd, summary_explanation
 
-        # Transcode Path: Incompatible codec or bloated bitrate (> 8000 kbps)
-        if meta.overall_bitrate_kbps > 8000:
-            explanation.append(f"Optimized camera bitrate bloat ({meta.overall_bitrate_kbps // 1000} Mbps -> High Quality Mobile Profile)")
+        # Auto Optimization Path: Downscale >1080p to 1080p, cap >60fps, optimize bitrate for smooth mobile playback
+        if scale_f:
+            explanation.append(f"Optimized resolution ({meta.resolution_label} -> 1080p FHD cap) eliminating decoding lag on smartphones")
         else:
-            explanation.append(f"Normalized incompatible codec ({v_codec.upper()}) to universal smartphone H.264")
+            explanation.append(f"Preserved native {meta.resolution_label} resolution (never upscaled)")
+
+        if fps_f:
+            explanation.append(f"Capped high framerate ({meta.fps:.0f} fps -> 60 fps) for smooth hardware decoding without frame drops")
+        elif meta.fps:
+            explanation.append(f"Preserved native framerate ({meta.fps:.0f} fps for fluid motion)")
+
+        if meta.overall_bitrate_kbps > 8000:
+            explanation.append(f"Optimized high camera bitrate ({meta.overall_bitrate_kbps // 1000} Mbps -> High Quality Mobile Profile)")
+        else:
+            explanation.append(f"Optimized stream density for butter-smooth mobile playback ({src_br} kbps cap)")
 
         if hw.hwaccel_type == "vaapi" and hw.hwaccel_device:
             cmd = ["-init_hw_device", f"vaapi=va:{hw.hwaccel_device}", "-filter_hw_device", "va", "-i", str(meta.file_path)]
-            filters = [f for f in [fps_f, "format=nv12", "hwupload"] if f]
+            filters = [f for f in [scale_f, fps_f, "format=nv12", "hwupload"] if f]
             if filters:
                 cmd.extend(["-vf", ",".join(filters)])
             cmd.extend([
                 "-c:v", "h264_vaapi",
-                "-qp", "26"
+                "-qp", "33"
             ])
             explanation.append(f"Processed via Intel GPU Hardware Acceleration ({hw.hwaccel_device})")
         else:
             cmd = ["-i", str(meta.file_path)]
-            filters = [f for f in [fps_f, "format=yuv420p"] if f]
+            filters = [f for f in [scale_f, fps_f, "format=yuv420p"] if f]
             if filters:
                 cmd.extend(["-vf", ",".join(filters)])
+            target_crf = 21
+            target_maxrate = min(5000, max(200, int(src_br * 0.85)))
             cmd.extend([
                 "-c:v", "libx264",
                 "-profile:v", "high",
                 "-level", "4.1",
                 "-preset", "veryfast",
-                "-crf", "20",
+                "-crf", str(target_crf),
+                "-maxrate", f"{target_maxrate}k",
+                "-bufsize", f"{target_maxrate * 2}k",
                 "-pix_fmt", "yuv420p",
                 "-threads", str(hw.cpu_cores)
             ])

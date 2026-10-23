@@ -328,10 +328,12 @@ def test_4k_vertical_downscaling():
         assert cmd_mod[cmd_mod.index("-preset") + 1] == "veryfast"
     assert "1080p FHD cap" in exp_mod
 
-    # 3. Auto Recommended Mode (Strictly preserves native 4K resolution; never downscales to 1080p)
+    # 3. Auto Recommended Mode (Downscales heavy 4K to 1080p FHD cap for lag-free mobile playback)
     cmd_auto, exp_auto = VideoOptimizer.build_auto_recommended_args(meta_4k, out_file)
-    assert "scale=" not in str(cmd_auto)
-    assert "without downscaling" in exp_auto
+    assert "-vf" in cmd_auto
+    vf_idx = cmd_auto.index("-vf")
+    assert "scale=1080:-2" in cmd_auto[vf_idx + 1]
+    assert "1080p FHD cap" in exp_auto
     assert "-movflags" in cmd_auto
     assert "+faststart" in cmd_auto
 
