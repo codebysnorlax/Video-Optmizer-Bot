@@ -14,7 +14,7 @@ from core.hardware import HardwareProfile, current_hardware
 class VideoConverter:
     """Generates FFmpeg command parameters for video conversion and audio extraction."""
 
-    SUPPORTED_VIDEO_FORMATS = ["mp4", "mkv", "webm", "avi", "mov", "mpg"]
+    SUPPORTED_VIDEO_FORMATS = ["audio_fix", "mp4", "mkv", "webm", "avi", "mov", "mpg"]
     SUPPORTED_AUDIO_FORMATS = ["mp3", "aac", "ogg", "wav"]
 
     @staticmethod
@@ -32,7 +32,15 @@ class VideoConverter:
         cmd = ["-i", str(meta.file_path)]
         is_audio = False
 
-        if fmt == "mp4":
+        if fmt in ("audio_fix", "fix_audio", "fixaudio"):
+            # Smartphone Audio Fix: Copy video untouched (-c:v copy), convert audio to standard AAC stereo 192k
+            cmd.extend([
+                "-c:v", "copy",
+                "-c:a", "aac", "-b:a", "192k", "-ac", "2",
+                "-movflags", "+faststart"
+            ])
+
+        elif fmt == "mp4":
             # If already H.264 + AAC, fast stream copy!
             if meta.video_codec == "h264" and meta.audio_codec in ("aac", None):
                 cmd.extend(["-c", "copy", "-movflags", "+faststart"])

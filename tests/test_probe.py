@@ -74,3 +74,55 @@ def test_format_time_breakdown():
     assert "Total Active Pipeline: `21.1s`" in res
     assert "Total Overall Time: `32.6s`" in res
 
+
+def test_format_before_after_analysis(sample_video: Path):
+    from core.probe import format_before_after_analysis
+    meta1 = MediaMetadata(
+        file_path=sample_video,
+        file_name="before.mp4",
+        file_size_bytes=10000000,
+        duration_seconds=10.0,
+        container_format="mp4",
+        has_video=True,
+        video_codec="hevc",
+        width=3840,
+        height=2160,
+        fps=30.0,
+        video_bitrate_kbps=7500,
+        has_audio=True,
+        audio_codec="ac3",
+        audio_channels=6,
+        audio_sample_rate=48000,
+        audio_bitrate_kbps=384,
+        overall_bitrate_kbps=8000,
+        is_high_bitrate=True,
+        raw_info={}
+    )
+    meta2 = MediaMetadata(
+        file_path=sample_video,
+        file_name="after.mp4",
+        file_size_bytes=4000000,
+        duration_seconds=10.0,
+        container_format="mp4",
+        has_video=True,
+        video_codec="h264",
+        width=1920,
+        height=1080,
+        fps=30.0,
+        video_bitrate_kbps=3000,
+        has_audio=True,
+        audio_codec="aac",
+        audio_channels=2,
+        audio_sample_rate=48000,
+        audio_bitrate_kbps=192,
+        overall_bitrate_kbps=3200,
+        is_high_bitrate=False,
+        raw_info={}
+    )
+    res = format_before_after_analysis(meta1, meta2)
+    assert "*Before & After Media Analysis:*" in res
+    assert "HEVC` -> `H264`" in res
+    assert "AC3 (6ch)` -> `AAC (2ch)`" in res
+    assert "60.0% Saved" in res
+
+

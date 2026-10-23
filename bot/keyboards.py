@@ -33,6 +33,9 @@ def build_convert_menu(task_id: str) -> List[List[Button]]:
     """Builds video conversion and audio extraction choices."""
     return [
         [
+            Button.inline("Fix Audio (Smartphone AAC)", data=f"conv_run:audio_fix:{task_id}".encode())
+        ],
+        [
             Button.inline("MP4", data=f"conv_run:mp4:{task_id}".encode()),
             Button.inline("MKV", data=f"conv_run:mkv:{task_id}".encode()),
             Button.inline("WEBM", data=f"conv_run:webm:{task_id}".encode())

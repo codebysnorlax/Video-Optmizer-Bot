@@ -66,3 +66,13 @@ async def test_converter_modes(sample_media: Path, tmp_path: Path):
     assert is_audio is True
     assert "-vn" in cmd
     assert "libmp3lame" in cmd
+
+    # Convert with audio_fix (Smartphone Audio Fix)
+    audio_fix_out = tmp_path / "out_audiofix.mp4"
+    cmd, is_audio = VideoConverter.build_convert_args(meta, "audio_fix", audio_fix_out, current_hardware)
+    assert is_audio is False
+    assert "-c:v" in cmd
+    assert "copy" in cmd
+    assert "-c:a" in cmd
+    assert "aac" in cmd
+    assert "192k" in cmd

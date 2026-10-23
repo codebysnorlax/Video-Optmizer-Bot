@@ -247,3 +247,39 @@ async def probe_media(file_path: Path) -> MediaMetadata:
         is_high_bitrate=is_high_bitrate,
         raw_info=data
     )
+
+
+def format_before_after_analysis(before: MediaMetadata, after: MediaMetadata) -> str:
+    """Formats a side-by-side comparative analysis of before and after media."""
+    if after.file_size_bytes < before.file_size_bytes:
+        saved = before.file_size_bytes - after.file_size_bytes
+        ratio = (saved / before.file_size_bytes) * 100
+        size_diff = f"{format_bytes(before.file_size_bytes)} -> {format_bytes(after.file_size_bytes)} ({ratio:.1f}% Saved)"
+    elif after.file_size_bytes == before.file_size_bytes:
+        size_diff = f"{format_bytes(before.file_size_bytes)} -> {format_bytes(after.file_size_bytes)} (Identical)"
+    else:
+        inc = after.file_size_bytes - before.file_size_bytes
+        inc_pct = (inc / before.file_size_bytes) * 100
+        size_diff = f"{format_bytes(before.file_size_bytes)} -> {format_bytes(after.file_size_bytes)} (+{inc_pct:.1f}% for standard compatibility)"
+
+    lines = ["*Before & After Media Analysis:*"]
+    
+    # Video resolution & codec
+    if before.has_video and after.has_video:
+        lines.append(f"• Resolution: `{before.resolution_label}` -> `{after.resolution_label}`")
+        v_before = before.video_codec.upper() if before.video_codec else "Unknown"
+        v_after = after.video_codec.upper() if after.video_codec else "Unknown"
+        lines.append(f"• Video Codec: `{v_before}` -> `{v_after}`")
+    elif before.has_video and not after.has_video:
+        lines.append(f"• Video Stream: `{before.resolution_label}` -> `Stripped (Audio Only)`")
+
+    # Audio codec & channels
+    a_before = f"{before.audio_codec.upper()} ({before.audio_channels}ch)" if before.has_audio and before.audio_codec else "None"
+    a_after = f"{after.audio_codec.upper()} ({after.audio_channels}ch)" if after.has_audio and after.audio_codec else "None"
+    lines.append(f"• Audio Codec: `{a_before}` -> `{a_after}`")
+
+    # Overall bitrate
+    lines.append(f"• Overall Bitrate: `{before.overall_bitrate_kbps} kbps` -> `{after.overall_bitrate_kbps} kbps`")
+    lines.append(f"• File Size: `{size_diff}`")
+
+    return "\n".join(lines)

@@ -9,7 +9,12 @@ import logging
 from pathlib import Path
 from telethon import events
 from config.settings import settings
-from core.probe import format_bytes, format_duration
+from core.probe import (
+    format_bytes,
+    format_duration,
+    probe_media,
+    format_before_after_analysis
+)
 from core.hardware import current_hardware
 from core.terminal import term_log
 from core.engine import run_ffmpeg_with_progress
@@ -93,6 +98,7 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         menu = build_convert_menu(task_id)
         text = (
             "*Select Target Conversion Format:*\n\n"
+            "• Quick Fix: `Fix Audio (Smartphone AAC)`\n"
             "• Video: `MP4`, `MKV`, `WEBM`, `AVI`, `MOV`, `MPG`\n"
             "• Audio Extraction: `MP3`, `AAC`"
         )
@@ -213,8 +219,9 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             await event.answer("Session expired or file was deleted.", alert=True)
             return
 
-        term_log("PROCESS", f"User selected Conversion ({target_fmt.upper()})", task_id=task_id)
-        await event.answer(f"Converting to {target_fmt.upper()}...")
+        label = "Smartphone Audio Fix (AAC)" if target_fmt == "audio_fix" else f"Conversion ({target_fmt.upper()})"
+        term_log("PROCESS", f"User selected {label}", task_id=task_id)
+        await event.answer("Fixing audio for smartphones..." if target_fmt == "audio_fix" else f"Converting to {target_fmt.upper()}...")
         asyncio.create_task(process_conversion(task_ctx, target_fmt, client))
         return
 
@@ -335,27 +342,11 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 inc_pct = (inc_bytes / meta.file_size_bytes * 100)
                 reduction_str = f"+{inc_pct:.1f}% ({format_bytes(inc_bytes)} added for standard compatibility)"
 
-            caption = (
-                f"*{mode_label} Complete!*\n\n"
-                f"*File:* `{meta.file_name}`\n"
-                f"*Duration:* `{format_duration(meta.duration_seconds)}`\n"
-                f"*Original:* `{format_bytes(meta.file_size_bytes)}` -> *Optimized:* `{format_bytes(out_size)}`\n"
-                f"*Status:* `{reduction_str}`\n\n"
-                f"*Time Details:*\n"
-                f"• Receive & Download: `{task_ctx.download_time:.1f}s`\n"
-                f"• Media Analysis: `{task_ctx.probe_time:.1f}s`\n"
-                f"• Transcode / Processing: `{transcode_time:.1f}s`\n"
-                f"• Upload to Telegram: `Finalizing...`\n\n"
-                f"*Engine:* `{current_hardware.description}`"
-            )
-            if explanation:
-                caption += f"\n\n*Fixes Applied:*\n{explanation}"
-
-            # Send video file to user
+            # 1. Send media file without long caption
             sent_msg = await client.send_file(
                 entity=user_id,
                 file=str(out_path),
-                caption=caption,
+                caption=f"`{out_name}`",
                 supports_streaming=True,
                 progress_callback=upload_progress
             )
@@ -364,6 +355,10 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
 
             total_pipeline_time = round(task_ctx.download_time + task_ctx.probe_time + transcode_time + upload_time, 1)
             total_overall_time = round(time.time() - task_ctx.t_received, 1) if task_ctx.t_received > 0 else total_pipeline_time
+
+            # 2. Probe output media for Before & After comparison
+            meta_after = await probe_media(out_path)
+            analysis_md = format_before_after_analysis(before=meta, after=meta_after)
 
             # Format full time breakdown
             time_breakdown_str = format_time_breakdown(
@@ -375,23 +370,43 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 total_overall_time=total_overall_time
             )
 
-            # Update delivered message caption with precise upload & total time
-            final_caption = (
-                f"*{mode_label} Complete!*\n\n"
-                f"*File:* `{meta.file_name}`\n"
-                f"*Duration:* `{format_duration(meta.duration_seconds)}`\n"
-                f"*Original:* `{format_bytes(meta.file_size_bytes)}` -> *Optimized:* `{format_bytes(out_size)}`\n"
-                f"*Status:* `{reduction_str}`\n\n"
-                f"{time_breakdown_str}\n\n"
-                f"*Engine:* `{current_hardware.description}`"
-            )
-            if explanation:
-                final_caption += f"\n\n*Fixes Applied:*\n{explanation}"
+            # 3. Assemble full report text
+            disk = settings.get_disk_usage()
+            orig_name = Path(task_ctx.input_path).name
+            orig_size_str = format_bytes(meta.file_size_bytes)
 
+            report_parts = [
+                f"*{mode_label} Complete!*\n",
+                analysis_md,
+                "\n" + time_breakdown_str,
+                f"\n*Engine:* `{current_hardware.description}`"
+            ]
+            if explanation:
+                report_parts.append(f"\n*Fixes Applied:*\n{explanation}")
+
+            report_parts.append(
+                "\nStep 1 of 2: Original File Cleanup\n"
+                f"• Original Source File: `{orig_name}` ({orig_size_str})\n"
+                f"• Server Free Space: `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
+                "Would you like to delete the original source file from the server now?"
+            )
+            report_text = "\n".join(report_parts)
+
+            # 4. Send reply message directly replying to the delivered video
+            reply_msg = await client.send_message(
+                entity=user_id,
+                message=report_text,
+                reply_to=sent_msg.id,
+                buttons=build_cleanup_original_menu(task_id)
+            )
+
+            # 5. Delete previous progress status message
             try:
-                await sent_msg.edit(final_caption)
-            except Exception as e:
-                logger.debug(f"Caption edit error on sent message: {e}")
+                await status_msg.delete()
+            except Exception:
+                pass
+
+            task_ctx.status_message = reply_msg
 
             # Record completion in DB
             await record_task_complete(task_id, out_size, total_pipeline_time)
@@ -400,20 +415,6 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 f"Delivered to user! Output: {format_bytes(out_size)} | {reduction_str} | Total: {total_pipeline_time}s (Overall: {total_overall_time}s) [Down: {task_ctx.download_time}s, Probe: {task_ctx.probe_time}s, Transcode: {transcode_time}s, Up: {upload_time}s]",
                 task_id=task_id
             )
-
-            # Prompt user for disk cleanup (Step 1 of 2: Original file)
-            disk = settings.get_disk_usage()
-            orig_name = Path(task_ctx.input_path).name
-            orig_size_str = format_bytes(meta.file_size_bytes)
-            cleanup_prompt = (
-                "*Video Delivered Successfully!*\n\n"
-                f"{time_breakdown_str}\n\n"
-                "Step 1 of 2: Original File Cleanup\n"
-                f"• Original Source File: `{orig_name}` ({orig_size_str})\n"
-                f"• Server Free Space: `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
-                "Would you like to delete the original source file from the server now?"
-            )
-            await status_msg.edit(cleanup_prompt, buttons=build_cleanup_original_menu(task_id))
 
         except Exception as e:
             logger.error(f"Optimization error for task {task_id}: {e}", exc_info=True)
@@ -429,7 +430,13 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
     meta = task_ctx.meta
     status_msg = task_ctx.status_message
     
-    out_name = f"conv_{task_ctx.input_path.stem}.{target_fmt}"
+    if target_fmt == "audio_fix":
+        conv_label = "Smartphone Audio Fix (AAC)"
+        out_name = f"audiofix_{task_ctx.input_path.stem}.mp4"
+    else:
+        conv_label = f"Conversion to {target_fmt.upper()}"
+        out_name = f"conv_{task_ctx.input_path.stem}.{target_fmt}"
+    
     out_path = settings.OUTPUT_DIR / f"{task_id}_{out_name}"
     task_ctx.output_path = out_path
 
@@ -444,7 +451,7 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
     )
 
     updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
-    await updater.update(f"*Queued for conversion to {target_fmt.upper()}...*\nWaiting for processing slot...", force=True)
+    await updater.update(f"*Queued for {conv_label}...*\nWaiting for processing slot...", force=True)
 
     start_exec = time.time()
 
@@ -511,24 +518,12 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                 )
                 await updater.update(text)
 
-            caption = (
-                f"*Conversion to {target_fmt.upper()} Complete!*\n\n"
-                f"*File:* `{meta.file_name}`\n"
-                f"*Output Size:* `{format_bytes(out_size)}`\n\n"
-                f"*Time Details:*\n"
-                f"• Receive & Download: `{task_ctx.download_time:.1f}s`\n"
-                f"• Media Analysis: `{task_ctx.probe_time:.1f}s`\n"
-                f"• Transcode / Processing: `{transcode_time:.1f}s`\n"
-                f"• Upload to Telegram: `Finalizing...`\n\n"
-                f"*Engine:* `{current_hardware.description}`"
-            )
-
-            # Send file or audio
+            # 1. Send file or audio without long caption
             if is_audio:
                 sent_msg = await client.send_file(
                     entity=user_id,
                     file=str(out_path),
-                    caption=caption,
+                    caption=f"`{out_name}`",
                     voice_note=False,
                     progress_callback=upload_progress
                 )
@@ -536,7 +531,7 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                 sent_msg = await client.send_file(
                     entity=user_id,
                     file=str(out_path),
-                    caption=caption,
+                    caption=f"`{out_name}`",
                     supports_streaming=True,
                     progress_callback=upload_progress
                 )
@@ -545,6 +540,10 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
 
             total_pipeline_time = round(task_ctx.download_time + task_ctx.probe_time + transcode_time + upload_time, 1)
             total_overall_time = round(time.time() - task_ctx.t_received, 1) if task_ctx.t_received > 0 else total_pipeline_time
+
+            # 2. Probe output media for Before & After comparison
+            meta_after = await probe_media(out_path)
+            analysis_md = format_before_after_analysis(before=meta, after=meta_after)
 
             # Format full time breakdown
             time_breakdown_str = format_time_breakdown(
@@ -556,18 +555,43 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                 total_overall_time=total_overall_time
             )
 
-            # Update delivered message caption with precise upload & total time
-            final_caption = (
-                f"*Conversion to {target_fmt.upper()} Complete!*\n\n"
-                f"*File:* `{meta.file_name}`\n"
-                f"*Output Size:* `{format_bytes(out_size)}`\n\n"
-                f"{time_breakdown_str}\n\n"
-                f"*Engine:* `{current_hardware.description}`"
+            # 3. Assemble full report text
+            disk = settings.get_disk_usage()
+            orig_name = Path(task_ctx.input_path).name
+            orig_size_str = format_bytes(meta.file_size_bytes)
+
+            report_parts = [
+                f"*{conv_label} Complete!*\n",
+                analysis_md,
+                "\n" + time_breakdown_str,
+                f"\n*Engine:* `{current_hardware.description}`"
+            ]
+            if target_fmt == "audio_fix":
+                report_parts.append("\n*Fixes Applied:*\n• Copied video stream untouched without re-encoding (zero quality loss)\n• Transcoded audio to universal stereo AAC 192k for smartphone & TV compatibility\n• Optimized MP4 faststart for instant playback streaming")
+
+            report_parts.append(
+                "\nStep 1 of 2: Original File Cleanup\n"
+                f"• Original Source File: `{orig_name}` ({orig_size_str})\n"
+                f"• Server Free Space: `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
+                "Would you like to delete the original source file from the server now?"
             )
+            report_text = "\n".join(report_parts)
+
+            # 4. Send reply message directly replying to the delivered media
+            reply_msg = await client.send_message(
+                entity=user_id,
+                message=report_text,
+                reply_to=sent_msg.id,
+                buttons=build_cleanup_original_menu(task_id)
+            )
+
+            # 5. Delete previous progress status message
             try:
-                await sent_msg.edit(final_caption)
-            except Exception as e:
-                logger.debug(f"Caption edit error on sent message: {e}")
+                await status_msg.delete()
+            except Exception:
+                pass
+
+            task_ctx.status_message = reply_msg
 
             # Record completion in DB
             await record_task_complete(task_id, out_size, total_pipeline_time)
@@ -576,20 +600,6 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                 f"Delivered {target_fmt.upper()} to user! Size: {format_bytes(out_size)} | Total: {total_pipeline_time}s (Overall: {total_overall_time}s) [Down: {task_ctx.download_time}s, Probe: {task_ctx.probe_time}s, Transcode: {transcode_time}s, Up: {upload_time}s]",
                 task_id=task_id
             )
-
-            # Prompt user for disk cleanup (Step 1 of 2: Original file)
-            disk = settings.get_disk_usage()
-            orig_name = Path(task_ctx.input_path).name
-            orig_size_str = format_bytes(meta.file_size_bytes)
-            cleanup_prompt = (
-                f"*{target_fmt.upper()} Delivered Successfully!*\n\n"
-                f"{time_breakdown_str}\n\n"
-                "Step 1 of 2: Original File Cleanup\n"
-                f"• Original Source File: `{orig_name}` ({orig_size_str})\n"
-                f"• Server Free Space: `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
-                "Would you like to delete the original source file from the server now?"
-            )
-            await status_msg.edit(cleanup_prompt, buttons=build_cleanup_original_menu(task_id))
 
         except Exception as e:
             logger.error(f"Conversion error for task {task_id}: {e}", exc_info=True)
