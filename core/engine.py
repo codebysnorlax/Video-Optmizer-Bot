@@ -28,7 +28,7 @@ async def run_ffmpeg_with_progress(
     cmd: List[str],
     total_duration_seconds: float,
     progress_callback: Optional[ProgressCallback] = None,
-    progress_interval: float = 2.5
+    progress_interval: float = 0.2
 ) -> None:
     """
     Executes FFmpeg with asynchronous line-by-line progress parsing.

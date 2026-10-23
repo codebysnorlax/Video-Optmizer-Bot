@@ -9,12 +9,12 @@ import logging
 import asyncio
 from config.settings import settings
 from core.hardware import current_hardware
-from core.terminal import ColoredLogFormatter, print_banner_box, BOLD_GREEN, RESET
+from core.terminal import ColoredLogFormatter, InteractiveStreamHandler, print_banner_box, BOLD_GREEN, RESET
 from database.db import init_db
 from bot.client import create_bot_client
 
 # Configure colorful structured logging
-handler = logging.StreamHandler(sys.stdout)
+handler = InteractiveStreamHandler(sys.stdout)
 handler.setFormatter(ColoredLogFormatter())
 root_logger = logging.getLogger()
 root_logger.setLevel(logging.INFO)

@@ -263,9 +263,9 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 nonlocal last_proc_log
                 now = time.time()
                 eta_str = f"{eta}s" if eta is not None else "--"
-                if now - last_proc_log >= 2.0:
+                if now - last_proc_log >= 0.15:
                     last_proc_log = now
-                    term_log("PROCESS", f"Transcoding ({mode_label})", task_id=task_id, progress=percent, extra=f"speed {speed}, fps {fps:.1f}, eta {eta_str}")
+                    term_log("PROCESS", f"Transcoding ({mode_label})", task_id=task_id, progress=percent, extra=f"speed {speed}, fps {fps:.1f}, eta {eta_str}", live=True)
 
                 bar = make_progress_bar(percent)
                 text = (
@@ -277,13 +277,14 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 await updater.update(text)
 
             term_log("PROCESS", f"Starting FFmpeg transcode pipeline ({mode_label})", task_id=task_id)
-            # Run FFmpeg transcode
+            # Run FFmpeg transcode with 0.2s interval for smooth terminal rendering
             await run_ffmpeg_with_progress(
                 cmd=cmd,
                 total_duration_seconds=meta.duration_seconds,
                 progress_callback=transcode_progress,
-                progress_interval=settings.PROGRESS_UPDATE_INTERVAL
+                progress_interval=0.2
             )
+            term_log("PROCESS", f"Transcode finished ({mode_label})", task_id=task_id, live=False)
 
             # Transcode completed
             elapsed_time = round(time.time() - start_exec, 1)
@@ -304,9 +305,9 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 nonlocal last_up_log
                 now = time.time()
                 percent = (current_bytes / total_bytes * 100) if total_bytes > 0 else 0
-                if now - last_up_log >= 2.0:
+                if now - last_up_log >= 0.15:
                     last_up_log = now
-                    term_log("UPLOAD", f"Uploading optimized video", task_id=task_id, progress=percent)
+                    term_log("UPLOAD", f"Uploading optimized video", task_id=task_id, progress=percent, live=True)
 
                 text = format_progress_status(
                     action_label="*Uploading Optimized Video to Telegram:*",
@@ -317,15 +318,23 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 await updater.update(text)
 
             # Calculate savings
-            saved_bytes = max(0, meta.file_size_bytes - out_size)
-            ratio = (saved_bytes / meta.file_size_bytes * 100) if meta.file_size_bytes > 0 else 0
+            if out_size < meta.file_size_bytes:
+                saved_bytes = meta.file_size_bytes - out_size
+                ratio = (saved_bytes / meta.file_size_bytes * 100)
+                reduction_str = f"{ratio:.1f}% Saved ({format_bytes(saved_bytes)})"
+            elif out_size == meta.file_size_bytes:
+                reduction_str = "Identical Size"
+            else:
+                inc_bytes = out_size - meta.file_size_bytes
+                inc_pct = (inc_bytes / meta.file_size_bytes * 100)
+                reduction_str = f"+{inc_pct:.1f}% ({format_bytes(inc_bytes)} added for standard compatibility)"
 
             caption = (
                 f"*{mode_label} Complete!*\n\n"
                 f"*File:* `{meta.file_name}`\n"
                 f"*Duration:* `{format_duration(meta.duration_seconds)}`\n"
                 f"*Original:* `{format_bytes(meta.file_size_bytes)}` -> *Optimized:* `{format_bytes(out_size)}`\n"
-                f"*Reduction:* `{ratio:.1f}% Saved` ({format_bytes(saved_bytes)})\n"
+                f"*Status:* `{reduction_str}`\n"
                 f"*Processing Time:* `{elapsed_time}s`\n"
                 f"*Engine:* `{current_hardware.description}`"
             )
@@ -340,10 +349,11 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 supports_streaming=True,
                 progress_callback=upload_progress
             )
+            term_log("UPLOAD", f"Upload finished", task_id=task_id, live=False)
 
             # Record completion in DB
             await record_task_complete(task_id, out_size, elapsed_time)
-            term_log("DONE", f"Delivered to user! Saved {format_bytes(saved_bytes)} ({ratio:.1f}%) in {elapsed_time}s", task_id=task_id)
+            term_log("DONE", f"Delivered to user! Output: {format_bytes(out_size)} | {reduction_str} in {elapsed_time}s", task_id=task_id)
 
             # Prompt user for disk cleanup (Step 1 of 2: Original file)
             disk = settings.get_disk_usage()
@@ -401,9 +411,9 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                 nonlocal last_conv_log
                 now = time.time()
                 eta_str = f"{eta}s" if eta is not None else "--"
-                if now - last_conv_log >= 2.0:
+                if now - last_conv_log >= 0.15:
                     last_conv_log = now
-                    term_log("PROCESS", f"Converting ({target_fmt.upper()})", task_id=task_id, progress=percent, extra=f"speed {speed}, eta {eta_str}")
+                    term_log("PROCESS", f"Converting ({target_fmt.upper()})", task_id=task_id, progress=percent, extra=f"speed {speed}, eta {eta_str}", live=True)
 
                 bar = make_progress_bar(percent)
                 text = (
@@ -419,8 +429,9 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                 cmd=cmd,
                 total_duration_seconds=meta.duration_seconds,
                 progress_callback=transcode_progress,
-                progress_interval=settings.PROGRESS_UPDATE_INTERVAL
+                progress_interval=0.2
             )
+            term_log("PROCESS", f"Transcode finished ({target_fmt.upper()})", task_id=task_id, live=False)
 
             elapsed_time = round(time.time() - start_exec, 1)
             out_size = os.path.getsize(out_path) if out_path.exists() else 0
@@ -440,9 +451,9 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                 nonlocal last_up_log
                 now = time.time()
                 percent = (current_bytes / total_bytes * 100) if total_bytes > 0 else 0
-                if now - last_up_log >= 2.0:
+                if now - last_up_log >= 0.15:
                     last_up_log = now
-                    term_log("UPLOAD", f"Uploading converted {target_fmt.upper()}", task_id=task_id, progress=percent)
+                    term_log("UPLOAD", f"Uploading converted {target_fmt.upper()}", task_id=task_id, progress=percent, live=True)
 
                 text = format_progress_status(
                     action_label=f"*Uploading {target_fmt.upper()} to Telegram:*",
@@ -477,6 +488,7 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                     supports_streaming=True,
                     progress_callback=upload_progress
                 )
+            term_log("UPLOAD", f"Upload finished", task_id=task_id, live=False)
 
             # Record completion in DB
             await record_task_complete(task_id, out_size, elapsed_time)

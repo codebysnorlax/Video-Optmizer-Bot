@@ -1,5 +1,6 @@
 """
 Terminal Styling, Colorful Structured Logging & Animated Braille Spinners
+Supports in-place dynamic spinner line updates (\r\033[K) so progress does not spam new lines.
 """
 
 import sys
@@ -31,6 +32,7 @@ BOLD_WHITE = "\033[1;37m"
 # Braille Spinner Frames (user requested like ⣷)
 SPINNER_FRAMES = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]
 _spinner_idx = 0
+_is_live = False
 
 
 def get_spinner() -> str:
@@ -39,6 +41,15 @@ def get_spinner() -> str:
     char = SPINNER_FRAMES[_spinner_idx % len(SPINNER_FRAMES)]
     _spinner_idx += 1
     return char
+
+
+def clear_live_line() -> None:
+    """Clears the live in-place progress line if active."""
+    global _is_live
+    if _is_live:
+        sys.stdout.write("\r\033[K")
+        sys.stdout.flush()
+        _is_live = False
 
 
 class ColoredLogFormatter(logging.Formatter):
@@ -60,17 +71,28 @@ class ColoredLogFormatter(logging.Formatter):
         return f"{DIM}{timestamp}{RESET} {level_tag} {name_tag} {record.getMessage()}"
 
 
+class InteractiveStreamHandler(logging.StreamHandler):
+    """Custom StreamHandler that clears in-place live line before logging."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        clear_live_line()
+        super().emit(record)
+
+
 def term_log(
     stage: str,
     message: str,
     task_id: Optional[str] = None,
     progress: Optional[float] = None,
-    extra: Optional[str] = None
+    extra: Optional[str] = None,
+    live: bool = False
 ) -> None:
     """
-    Prints a colorful, well-structured process log line to the terminal
-    featuring animated braille spinners for active stages.
+    Prints a colorful, well-structured process log line to the terminal.
+    When live=True, it updates the same line in-place using carriage returns (\r\033[K)
+    and spins the Braille character without appending endless lines!
     """
+    global _is_live
     timestamp = time.strftime("%H:%M:%S")
     spinner = get_spinner()
     
@@ -92,7 +114,7 @@ def term_log(
     elif stage_upper in ("SUCCESS", "DONE", "DELIVERED"):
         badge = f"{BOLD_GREEN}[DONE]   {RESET}"
         icon = f"{BOLD_GREEN}OK{RESET}"
-    elif stage_upper in ("CLEANUP", "DELETE"):
+    elif stage_upper in ("CLEANUP", "DELETE", "STORAGE"):
         badge = f"{CYAN}[STORAGE]{RESET}"
         icon = f"{CYAN}*{RESET}"
     elif stage_upper in ("ERROR", "FAIL"):
@@ -111,11 +133,21 @@ def term_log(
     extra_str = f" ({DIM}{extra}{RESET})" if extra else ""
 
     line = f"{DIM}{timestamp}{RESET} {badge} {icon} {task_tag}{message}{prog_str}{extra_str}"
-    print(line, flush=True)
+    
+    if live:
+        sys.stdout.write(f"\r\033[K{line}")
+        sys.stdout.flush()
+        _is_live = True
+    else:
+        if _is_live:
+            sys.stdout.write("\r\033[K")
+            _is_live = False
+        print(line, flush=True)
 
 
 def print_banner_box(title: str, items: list) -> None:
     """Renders a colorful, structured box for terminal startup."""
+    clear_live_line()
     width = 68
     border_color = BOLD_CYAN
     line_top = f"{border_color}┌{'─' * (width - 2)}┐{RESET}"

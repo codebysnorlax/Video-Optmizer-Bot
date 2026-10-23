@@ -73,9 +73,9 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
         percent = (current_bytes / total_bytes * 100) if total_bytes > 0 else 0
         speed_mb = (current_bytes / max(0.1, now - start_time)) / (1024 * 1024)
 
-        if now - last_term_log >= 2.0:
+        if now - last_term_log >= 0.15:
             last_term_log = now
-            term_log("DOWNLOAD", f"Downloading {clean_name}", task_id=task_id, progress=percent, extra=f"{speed_mb:.1f} MB/s")
+            term_log("DOWNLOAD", f"Downloading {clean_name}", task_id=task_id, progress=percent, extra=f"{speed_mb:.1f} MB/s", live=True)
 
         text = format_progress_status(
             action_label="*Downloading Video from Telegram:*",
@@ -92,6 +92,7 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
             file=str(save_path),
             progress_callback=download_progress
         )
+        term_log("DOWNLOAD", f"Download finished: {clean_name}", task_id=task_id, live=False)
         
         term_log("PROBE", f"Inspecting media streams with FFprobe...", task_id=task_id)
         await updater.update("*Analyzing video streams with FFprobe...*", force=True)
