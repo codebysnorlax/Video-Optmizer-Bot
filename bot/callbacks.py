@@ -264,15 +264,24 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         # Ensure output is cleared and fresh original metadata is loaded from original input file
         task_ctx.output_path = None
         task_ctx.meta = await probe_media(task_ctx.input_path)
-        try:
-            task_ctx.status_message = await event.get_message()
-        except Exception:
-            pass
 
         term_log("PROCESS", f"Reloaded original source file for re-processing: {task_ctx.input_path.name}", task_id=task_id)
         summary = task_ctx.meta.get_summary_card(current_hardware.description)
         menu = build_main_menu(task_id)
-        await event.edit(summary, buttons=menu)
+
+        # Delete the previous reply/cleanup prompt so Telegram does not display the quote of the processed video
+        try:
+            await event.delete()
+        except Exception:
+            pass
+
+        # Send a fresh standalone message presenting the original file analysis
+        new_msg = await client.send_message(
+            entity=event.sender_id,
+            message=summary,
+            buttons=menu
+        )
+        task_ctx.status_message = new_msg
         await event.answer("Loaded original file! Select another optimization or conversion mode:", alert=False)
         return
 
@@ -284,12 +293,21 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         if not task_ctx:
             await event.answer("Session expired or file was deleted.", alert=True)
             return
+        if task_ctx.is_processing:
+            await event.answer("Processing is already in progress. Please wait...", alert=True)
+            return
 
+        task_ctx.is_processing = True
         task_ctx.output_path = None
         try:
             task_ctx.status_message = await event.get_message()
         except Exception:
             pass
+
+        mode_names = {"low": "Low Device", "mod": "Moderate", "auto": "Auto Recommended"}
+        mode_label = mode_names.get(sub_mode, "Optimization")
+        # Remove buttons immediately so user cannot click options while processing is running
+        await event.edit(f"**Queued for {mode_label}...**\nWaiting for processing slot...", buttons=None)
 
         term_log("PROCESS", f"User selected Optimization ({sub_mode.upper()}) using original source: {task_ctx.input_path.name}", task_id=task_id)
         await event.answer("Starting optimization...")
@@ -304,7 +322,11 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         if not task_ctx:
             await event.answer("Session expired or file was deleted.", alert=True)
             return
+        if task_ctx.is_processing:
+            await event.answer("Processing is already in progress. Please wait...", alert=True)
+            return
 
+        task_ctx.is_processing = True
         task_ctx.output_path = None
         try:
             task_ctx.status_message = await event.get_message()
@@ -312,6 +334,9 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             pass
 
         label = "Smartphone Audio Fix (AAC)" if target_fmt == "audio_fix" else f"Conversion ({target_fmt.upper()})"
+        # Remove buttons immediately
+        await event.edit(f"**Queued for {label}...**\nWaiting for processing slot...", buttons=None)
+
         term_log("PROCESS", f"User selected {label} using original source: {task_ctx.input_path.name}", task_id=task_id)
         await event.answer("Fixing audio for smartphones..." if target_fmt == "audio_fix" else f"Converting to {target_fmt.upper()}...")
         asyncio.create_task(process_conversion(task_ctx, target_fmt, client))
@@ -657,6 +682,10 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
             else:
                 cmd, explanation = VideoOptimizer.build_auto_recommended_args(meta, out_path, current_hardware)
 
+            active_engine_str = current_hardware.description if "-c:v" in cmd and "h264_vaapi" in cmd else (
+                "Pristine Stream (FastStart)" if "-c:v" in cmd and "copy" in cmd else f"CPU Multi-Thread ({current_hardware.cpu_cores} cores)"
+            )
+
             last_proc_log = 0.0
             async def transcode_progress(percent: float, speed: str, eta: int, fps: float):
                 nonlocal last_proc_log
@@ -671,7 +700,7 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                     f"**{mode_label} in Progress:**\n"
                     f"**Progress:** {bar}\n"
                     f"**Speed:** `{speed}` | **FPS:** `{fps:.1f}` | **ETA:** `{eta_str}`\n"
-                    f"**Engine:** `{current_hardware.description}`"
+                    f"**Engine:** `{active_engine_str}`"
                 )
                 await updater.update(text)
 
@@ -850,7 +879,7 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 f"**{mode_label} Complete!**\n",
                 analysis_md,
                 "\n" + time_breakdown_str,
-                f"\n• **Engine:** `{current_hardware.description}`"
+                f"\n• **Engine:** `{active_engine_str}`"
             ]
             if explanation:
                 report_parts.append(f"\n• **Fixes Applied:**\n{explanation}")
@@ -892,6 +921,8 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
             elapsed_time = round(time.time() - start_exec, 1)
             await record_task_failed(task_id, elapsed_time)
             await status_msg.edit(f"[ERROR] **Optimization Failed:**\n`{str(e)}`")
+        finally:
+            task_ctx.is_processing = False
 
 
 async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> None:
@@ -1093,3 +1124,5 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
             elapsed_time = round(time.time() - start_exec, 1)
             await record_task_failed(task_id, elapsed_time)
             await status_msg.edit(f"[ERROR] **Conversion Failed:**\n`{str(e)}`")
+        finally:
+            task_ctx.is_processing = False

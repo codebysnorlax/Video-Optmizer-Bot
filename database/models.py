@@ -164,8 +164,9 @@ async def get_user_recent_tasks(user_id: int, limit: int = 5) -> List[Dict[str, 
 
 
 async def get_user_cached_files(user_id: int) -> List[Dict[str, Any]]:
-    """Retrieves all cached files for a user that still exist on server disk."""
+    """Retrieves all cached files for a user that still exist on server disk (deduplicated by path)."""
     items = []
+    seen_paths = set()
     async with aiosqlite.connect(settings.DB_PATH) as db:
         db.row_factory = aiosqlite.Row
         async with db.execute(
@@ -181,26 +182,30 @@ async def get_user_cached_files(user_id: int) -> List[Dict[str, Any]]:
                 # Check original input file
                 in_path = data.get("input_path")
                 if data.get("input_deleted", 0) == 0 and in_path and os.path.exists(in_path):
-                    items.append({
-                        "task_id": task_id,
-                        "file_type": "original",
-                        "path": in_path,
-                        "name": Path(in_path).name,
-                        "size": os.path.getsize(in_path),
-                        "created_at": created_at
-                    })
+                    if in_path not in seen_paths:
+                        seen_paths.add(in_path)
+                        items.append({
+                            "task_id": task_id,
+                            "file_type": "original",
+                            "path": in_path,
+                            "name": Path(in_path).name,
+                            "size": os.path.getsize(in_path),
+                            "created_at": created_at
+                        })
 
                 # Check processed output file
                 out_path = data.get("output_path")
                 if data.get("output_deleted", 0) == 0 and out_path and os.path.exists(out_path):
-                    items.append({
-                        "task_id": task_id,
-                        "file_type": "processed",
-                        "path": out_path,
-                        "name": Path(out_path).name,
-                        "size": os.path.getsize(out_path),
-                        "created_at": created_at
-                    })
+                    if out_path not in seen_paths:
+                        seen_paths.add(out_path)
+                        items.append({
+                            "task_id": task_id,
+                            "file_type": "processed",
+                            "path": out_path,
+                            "name": Path(out_path).name,
+                            "size": os.path.getsize(out_path),
+                            "created_at": created_at
+                        })
     return items
 
 

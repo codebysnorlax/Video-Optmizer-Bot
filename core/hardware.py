@@ -201,7 +201,12 @@ def detect_hardware() -> HardwareProfile:
             hwaccel_type = "vaapi"
             hwaccel_device = dri_dev
             video_encoder = "h264_vaapi"
-            hevc_encoder = "hevc_vaapi"
+            # Test if HEVC VAAPI encoding entrypoint exists (Skylake supports decode only; Kaby Lake+ supports encode)
+            hevc_works = test_ffmpeg_encoder(
+                "hevc_vaapi",
+                extra_args=["-init_hw_device", f"vaapi=va:{dri_dev}", "-filter_hw_device", "va", "-vf", "format=nv12,hwupload"]
+            )
+            hevc_encoder = "hevc_vaapi" if hevc_works else "libx265"
             desc = f"Intel/AMD GPU (VAAPI @ {dri_dev})"
             break
 

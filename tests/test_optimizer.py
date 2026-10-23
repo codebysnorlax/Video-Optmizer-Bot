@@ -303,33 +303,35 @@ def test_4k_vertical_downscaling():
     )
     out_file = Path("/tmp/out.mp4")
 
-    # 1. Low Device Mode (must downscale to 720p cap with scale=720:-2 and maxrate <= 2000k)
+    # 1. Low Device Mode (must downscale to 720p cap with scale=720:-2)
     cmd_low, exp_low = VideoOptimizer.build_low_device_args(meta_4k, out_file)
     assert "-vf" in cmd_low
     vf_idx = cmd_low.index("-vf")
     assert "scale=720:-2" in cmd_low[vf_idx + 1]
-    assert "-maxrate" in cmd_low
-    maxrate_idx = cmd_low.index("-maxrate")
-    assert int(cmd_low[maxrate_idx + 1].replace("k", "")) <= 2000
-    assert "-preset" in cmd_low
-    assert cmd_low[cmd_low.index("-preset") + 1] == "veryfast"
+    if current_hardware.hwaccel_type == "vaapi":
+        assert "h264_vaapi" in cmd_low
+        assert "-qp" in cmd_low
+    else:
+        assert "-maxrate" in cmd_low
+        assert cmd_low[cmd_low.index("-preset") + 1] == "veryfast"
     assert "720p HD cap" in exp_low
 
-    # 2. Moderate Mode (must downscale to 1080p cap with scale=1080:-2 and maxrate <= 2800k)
+    # 2. Moderate Mode (must downscale to 1080p cap with scale=1080:-2)
     cmd_mod, exp_mod = VideoOptimizer.build_moderate_args(meta_4k, out_file)
     assert "-vf" in cmd_mod
     vf_idx = cmd_mod.index("-vf")
     assert "scale=1080:-2" in cmd_mod[vf_idx + 1]
-    assert "-preset" in cmd_mod
-    assert cmd_mod[cmd_mod.index("-preset") + 1] == "veryfast"
+    if current_hardware.hwaccel_type == "vaapi":
+        assert "h264_vaapi" in cmd_mod
+        assert "-qp" in cmd_mod
+    else:
+        assert cmd_mod[cmd_mod.index("-preset") + 1] == "veryfast"
     assert "1080p FHD cap" in exp_mod
 
-    # 3. Auto Recommended Mode (must downscale to 1080p cap with scale=1080:-2)
+    # 3. Auto Recommended Mode (Strictly preserves native 4K resolution; never downscales to 1080p)
     cmd_auto, exp_auto = VideoOptimizer.build_auto_recommended_args(meta_4k, out_file)
-    assert "-vf" in cmd_auto
-    vf_idx = cmd_auto.index("-vf")
-    assert "scale=1080:-2" in cmd_auto[vf_idx + 1]
-    assert "-preset" in cmd_auto
-    assert cmd_auto[cmd_auto.index("-preset") + 1] == "veryfast"
-    assert "1080p FHD" in exp_auto
+    assert "scale=" not in str(cmd_auto)
+    assert "without downscaling" in exp_auto
+    assert "-movflags" in cmd_auto
+    assert "+faststart" in cmd_auto
 

@@ -22,6 +22,7 @@ class TaskContext:
     t_received: float = 0.0
     download_time: float = 0.0
     probe_time: float = 0.0
+    is_processing: bool = False
 
 
 @dataclass

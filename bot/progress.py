@@ -43,7 +43,7 @@ class ThrottledMessageUpdater:
             if buttons is not None:
                 await self.message.edit(text, buttons=buttons)
             else:
-                await self.message.edit(text)
+                await self.message.edit(text, buttons=None)
         except MessageNotModifiedError:
             pass
         except FloodWaitError as e:

@@ -112,7 +112,7 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
         if existing_file and existing_file.exists():
             term_log("RECEIVE", f"Identical file found on server disk ({existing_file.name}), skipping download", task_id=task_id)
             await status_msg.edit("**Identical video found on server cache! Reusing file...**")
-            shutil.copy2(existing_file, save_path)
+            save_path = existing_file
             download_time = 0.0
         else:
             # Download media natively via Telethon MTProto chunked stream
@@ -158,7 +158,7 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
     except Exception as e:
         term_log("ERROR", f"Failed download or analysis: {str(e)}", task_id=task_id)
         logger.error(f"Error handling incoming video: {e}", exc_info=True)
-        if save_path.exists():
+        if (existing_file is None) and save_path.exists():
             try:
                 save_path.unlink()
             except Exception:
