@@ -99,3 +99,42 @@ def format_time_breakdown(
         f"• **Total Active Pipeline:** `{total_pipeline_time:.1f}s`\n"
         f"• **Total Overall Time:** `{total_overall_time:.1f}s`"
     )
+
+
+def format_confirm_stop_prompt(
+    stage_label: str,
+    live_progress_text: str = "",
+    details_block: str = ""
+) -> str:
+    """Renders 2-step confirmation prompt displaying that processing continues actively in background."""
+    parts = [
+        "**Confirm Stop Active Process**\n",
+        f"Are you 100% sure you want to stop active **{stage_label}**?\n",
+        "**Notice:** Processing & media transfer are **STILL actively running in the background** and will NOT stop until you confirm 100% sure below.\n"
+    ]
+    if live_progress_text:
+        parts.append(f"**Live Background Progress:**\n{live_progress_text}\n")
+    if details_block:
+        parts.append(f"**File & Quality Details:**\n{details_block}\n")
+    parts.append(f"If you confirm, the current {stage_label.lower()} operation will be terminated immediately.")
+    return "\n".join(parts)
+
+
+def format_confirm_stop_recall_prompt(
+    file_name: str,
+    live_progress_text: str = "",
+    details_block: str = ""
+) -> str:
+    """Renders 2-step confirmation prompt for recall transfers showing background continuation."""
+    parts = [
+        "**Confirm Stop Sending**\n",
+        f"Are you 100% sure you want to stop sending **{file_name}**?\n",
+        "**Notice:** File transfer is **STILL actively sending in the background** and will NOT stop until you confirm 100% sure below.\n"
+    ]
+    if live_progress_text:
+        parts.append(f"**Live Background Progress:**\n{live_progress_text}\n")
+    if details_block:
+        parts.append(f"**File & Quality Details:**\n{details_block}\n")
+    parts.append("If you confirm, the file transfer will be aborted immediately.")
+    return "\n".join(parts)
+

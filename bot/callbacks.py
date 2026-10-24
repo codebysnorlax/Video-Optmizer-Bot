@@ -55,7 +55,9 @@ from bot.progress import (
     ThrottledMessageUpdater,
     format_progress_status,
     make_progress_bar,
-    format_time_breakdown
+    format_time_breakdown,
+    format_confirm_stop_prompt,
+    format_confirm_stop_recall_prompt
 )
 from bot.task_manager import task_manager, TaskContext, RecallContext
 
@@ -694,13 +696,9 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             logger.debug(f"Could not probe recall file {recall_ctx.file_name}: {e}")
 
         details_block = "\n".join(details_lines)
-
-        confirm_text = (
-            "**Confirm Stop Sending**\n\n"
-            f"Are you 100% sure you want to stop sending **{recall_ctx.file_name}**?\n\n"
-            "**File & Quality Details:**\n"
-            f"{details_block}\n\n"
-            "If stopped, the file transfer will be aborted immediately."
+        confirm_text = format_confirm_stop_recall_prompt(
+            file_name=recall_ctx.file_name,
+            details_block=details_block
         )
         await event.edit(confirm_text, buttons=build_confirm_stop_menu(recall_id))
         await event.answer()
@@ -790,13 +788,10 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             except Exception:
                 pass
 
-        details_block = "\n**File & Quality Details:**\n" + "\n".join(details_lines) + "\n" if details_lines else ""
-
-        confirm_text = (
-            "**Confirm Stop Active Process**\n\n"
-            f"Are you 100% sure you want to stop active **{stage_name}**?\n"
-            f"{details_block}\n"
-            f"If stopped, the current {stage_name.lower()} operation will be terminated immediately."
+        details_block = "\n".join(details_lines) if details_lines else ""
+        confirm_text = format_confirm_stop_prompt(
+            stage_label=stage_name,
+            details_block=details_block
         )
         await event.edit(confirm_text, buttons=build_confirm_stop_task_menu(task_id))
         await event.answer()
@@ -952,14 +947,53 @@ async def do_recall_upload(recall_ctx: RecallContext, client) -> None:
         nonlocal last_log
         if recall_ctx.is_cancelled:
             raise asyncio.CancelledError()
-        if recall_ctx.is_confirming_stop:
-            return  # Do not overwrite confirmation prompt
-
         now = time.time()
         percent = (current_bytes / total_bytes * 100) if total_bytes > 0 else 0
         if now - last_log >= 0.15:
             last_log = now
             term_log("UPLOAD", f"Recalling {file_name}", task_id=task_id, progress=percent, live=True)
+
+        if recall_ctx.is_confirming_stop:
+            bar = make_progress_bar(percent)
+            cur_mb = current_bytes / (1024 * 1024)
+            tot_mb = total_bytes / (1024 * 1024)
+            elapsed = max(0.1, now - upload_start)
+            speed_mb = (current_bytes / elapsed) / (1024 * 1024)
+            rem_bytes = max(0, total_bytes - current_bytes)
+            eta = int(rem_bytes / max(1, current_bytes / elapsed))
+            live_progress = (
+                f"• **Progress:** {bar}\n"
+                f"• **Sent:** `{cur_mb:.1f} MB / {tot_mb:.1f} MB`\n"
+                f"• **Speed:** `{speed_mb:.1f} MB/s` | **ETA:** `{eta}s`"
+            )
+            details_lines = [
+                f"• **File Name:** `{file_name}`",
+                f"• **File Size:** `{format_bytes(file_size)}`"
+            ]
+            try:
+                if file_path.exists():
+                    meta = await probe_media(file_path)
+                    if meta.has_video:
+                        fps_str = f" @ {meta.fps:.2f}fps" if meta.fps else ""
+                        details_lines.append(f"• **Quality / Resolution:** `{meta.resolution_label}{fps_str}`")
+                        details_lines.append(f"• **Video Codec:** `{(meta.video_codec or 'unknown').upper()}`")
+                    if meta.has_audio:
+                        details_lines.append(f"• **Audio Codec:** `{(meta.audio_codec or 'unknown').upper()}`")
+                    if meta.duration_seconds > 0:
+                        details_lines.append(f"• **Duration:** `{format_duration(meta.duration_seconds)}`")
+                    if meta.overall_bitrate_kbps > 0:
+                        details_lines.append(f"• **Bitrate:** `{meta.overall_bitrate_kbps} kbps`")
+            except Exception:
+                pass
+
+            details_block = "\n".join(details_lines)
+            confirm_text = format_confirm_stop_recall_prompt(
+                file_name=file_name,
+                live_progress_text=live_progress,
+                details_block=details_block
+            )
+            await updater.update(confirm_text, buttons=build_confirm_stop_menu(recall_id))
+            return
 
         text = format_progress_status(
             action_label=f"**Recalling `{file_name}` to Telegram:**",
@@ -1103,9 +1137,6 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                         except Exception:
                             pass
                     raise asyncio.CancelledError()
-                if task_ctx.is_confirming_stop:
-                    return
-
                 now = time.time()
                 eta_str = f"{eta}s" if eta is not None else "--"
                 if now - last_proc_log >= 0.15:
@@ -1113,6 +1144,33 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                     term_log("PROCESS", f"Transcoding ({mode_label})", task_id=task_id, progress=percent, extra=f"speed {speed}, fps {fps:.1f}, eta {eta_str}", live=True)
 
                 bar = make_progress_bar(percent)
+                if task_ctx.is_confirming_stop:
+                    live_progress = (
+                        f"• **Progress:** {bar}\n"
+                        f"• **Speed:** `{speed}` | **FPS:** `{fps:.1f}` | **ETA:** `{eta_str}`\n"
+                        f"• **Engine:** `{active_engine_str}`"
+                    )
+                    details_lines = []
+                    if meta:
+                        fps_meta = f" @ {meta.fps:.2f}fps" if meta.fps else ""
+                        res_meta = f"{meta.resolution_label}{fps_meta}" if meta.has_video else "Audio Only"
+                        v_codec = (meta.video_codec or "unknown").upper() if meta.has_video else "None"
+                        a_codec = (meta.audio_codec or "none").upper() if meta.has_audio else "None"
+                        details_lines.append(f"• **Source File:** `{meta.file_name}`")
+                        details_lines.append(f"• **Quality / Resolution:** `{res_meta}`")
+                        details_lines.append(f"• **Source Size:** `{format_bytes(meta.file_size_bytes)}`")
+                        details_lines.append(f"• **Duration:** `{format_duration(meta.duration_seconds)}`")
+                        details_lines.append(f"• **Codecs:** `{v_codec} / {a_codec}`")
+                        details_lines.append(f"• **Bitrate:** `{meta.overall_bitrate_kbps} kbps`")
+                    details_block = "\n".join(details_lines)
+                    confirm_text = format_confirm_stop_prompt(
+                        stage_label=f"Optimizing ({mode_label})",
+                        live_progress_text=live_progress,
+                        details_block=details_block
+                    )
+                    await updater.update(confirm_text, buttons=build_confirm_stop_task_menu(task_id))
+                    return
+
                 text = (
                     f"**{mode_label} in Progress:**\n"
                     f"**Progress:** {bar}\n"
@@ -1232,14 +1290,51 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 nonlocal last_up_log
                 if task_ctx.is_cancelled:
                     raise asyncio.CancelledError()
-                if task_ctx.is_confirming_stop:
-                    return
-
                 now = time.time()
                 percent = (current_bytes / total_bytes * 100) if total_bytes > 0 else 0
                 if now - last_up_log >= 0.15:
                     last_up_log = now
                     term_log("UPLOAD", f"Uploading optimized video", task_id=task_id, progress=percent, live=True)
+
+                if task_ctx.is_confirming_stop:
+                    bar = make_progress_bar(percent)
+                    cur_mb = current_bytes / (1024 * 1024)
+                    tot_mb = total_bytes / (1024 * 1024)
+                    elapsed = max(0.1, now - upload_start)
+                    speed_mb = (current_bytes / elapsed) / (1024 * 1024)
+                    rem_bytes = max(0, total_bytes - current_bytes)
+                    eta = int(rem_bytes / max(1, current_bytes / elapsed))
+                    live_progress = (
+                        f"• **Progress:** {bar}\n"
+                        f"• **Uploaded:** `{cur_mb:.1f} MB / {tot_mb:.1f} MB`\n"
+                        f"• **Speed:** `{speed_mb:.1f} MB/s` | **ETA:** `{eta}s`"
+                    )
+                    details_lines = []
+                    if meta:
+                        fps_meta = f" @ {meta.fps:.2f}fps" if meta.fps else ""
+                        res_meta = f"{meta.resolution_label}{fps_meta}" if meta.has_video else "Audio Only"
+                        v_codec = (meta.video_codec or "unknown").upper() if meta.has_video else "None"
+                        a_codec = (meta.audio_codec or "none").upper() if meta.has_audio else "None"
+                        details_lines.append(f"• **Source File:** `{meta.file_name}`")
+                        details_lines.append(f"• **Quality / Resolution:** `{res_meta}`")
+                        details_lines.append(f"• **Source Size:** `{format_bytes(meta.file_size_bytes)}`")
+                        details_lines.append(f"• **Duration:** `{format_duration(meta.duration_seconds)}`")
+                        details_lines.append(f"• **Codecs:** `{v_codec} / {a_codec}`")
+                        details_lines.append(f"• **Bitrate:** `{meta.overall_bitrate_kbps} kbps`")
+                    if task_ctx.output_path and task_ctx.output_path.exists():
+                        try:
+                            out_size = os.path.getsize(task_ctx.output_path)
+                            details_lines.append(f"• **Target Output:** `{task_ctx.output_path.name}` ({format_bytes(out_size)})")
+                        except Exception:
+                            pass
+                    details_block = "\n".join(details_lines)
+                    confirm_text = format_confirm_stop_prompt(
+                        stage_label="Uploading Optimized Video",
+                        live_progress_text=live_progress,
+                        details_block=details_block
+                    )
+                    await updater.update(confirm_text, buttons=build_confirm_stop_task_menu(task_id))
+                    return
 
                 text = format_progress_status(
                     action_label="**Uploading Optimized Video to Telegram:**",
@@ -1423,9 +1518,6 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                         except Exception:
                             pass
                     raise asyncio.CancelledError()
-                if task_ctx.is_confirming_stop:
-                    return
-
                 now = time.time()
                 eta_str = f"{eta}s" if eta is not None else "--"
                 if now - last_conv_log >= 0.15:
@@ -1433,6 +1525,33 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                     term_log("PROCESS", f"Converting ({target_fmt.upper()})", task_id=task_id, progress=percent, extra=f"speed {speed}, eta {eta_str}", live=True)
 
                 bar = make_progress_bar(percent)
+                if task_ctx.is_confirming_stop:
+                    live_progress = (
+                        f"• **Progress:** {bar}\n"
+                        f"• **Speed:** `{speed}` | **ETA:** `{eta_str}`\n"
+                        f"• **Engine:** `{current_hardware.description}`"
+                    )
+                    details_lines = []
+                    if meta:
+                        fps_meta = f" @ {meta.fps:.2f}fps" if meta.fps else ""
+                        res_meta = f"{meta.resolution_label}{fps_meta}" if meta.has_video else "Audio Only"
+                        v_codec = (meta.video_codec or "unknown").upper() if meta.has_video else "None"
+                        a_codec = (meta.audio_codec or "none").upper() if meta.has_audio else "None"
+                        details_lines.append(f"• **Source File:** `{meta.file_name}`")
+                        details_lines.append(f"• **Quality / Resolution:** `{res_meta}`")
+                        details_lines.append(f"• **Source Size:** `{format_bytes(meta.file_size_bytes)}`")
+                        details_lines.append(f"• **Duration:** `{format_duration(meta.duration_seconds)}`")
+                        details_lines.append(f"• **Codecs:** `{v_codec} / {a_codec}`")
+                        details_lines.append(f"• **Bitrate:** `{meta.overall_bitrate_kbps} kbps`")
+                    details_block = "\n".join(details_lines)
+                    confirm_text = format_confirm_stop_prompt(
+                        stage_label=f"Converting ({conv_label})",
+                        live_progress_text=live_progress,
+                        details_block=details_block
+                    )
+                    await updater.update(confirm_text, buttons=build_confirm_stop_task_menu(task_id))
+                    return
+
                 text = (
                     f"**Converting to {target_fmt.upper()}:**\n"
                     f"**Progress:** {bar}\n"
@@ -1473,14 +1592,52 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                 nonlocal last_up_log
                 if task_ctx.is_cancelled:
                     raise asyncio.CancelledError()
-                if task_ctx.is_confirming_stop:
-                    return
 
                 now = time.time()
                 percent = (current_bytes / total_bytes * 100) if total_bytes > 0 else 0
                 if now - last_up_log >= 0.15:
                     last_up_log = now
                     term_log("UPLOAD", f"Uploading converted {target_fmt.upper()}", task_id=task_id, progress=percent, live=True)
+
+                if task_ctx.is_confirming_stop:
+                    bar = make_progress_bar(percent)
+                    cur_mb = current_bytes / (1024 * 1024)
+                    tot_mb = total_bytes / (1024 * 1024)
+                    elapsed = max(0.1, now - upload_start)
+                    speed_mb = (current_bytes / elapsed) / (1024 * 1024)
+                    rem_bytes = max(0, total_bytes - current_bytes)
+                    eta = int(rem_bytes / max(1, current_bytes / elapsed))
+                    live_progress = (
+                        f"• **Progress:** {bar}\n"
+                        f"• **Uploaded:** `{cur_mb:.1f} MB / {tot_mb:.1f} MB`\n"
+                        f"• **Speed:** `{speed_mb:.1f} MB/s` | **ETA:** `{eta}s`"
+                    )
+                    details_lines = []
+                    if meta:
+                        fps_meta = f" @ {meta.fps:.2f}fps" if meta.fps else ""
+                        res_meta = f"{meta.resolution_label}{fps_meta}" if meta.has_video else "Audio Only"
+                        v_codec = (meta.video_codec or "unknown").upper() if meta.has_video else "None"
+                        a_codec = (meta.audio_codec or "none").upper() if meta.has_audio else "None"
+                        details_lines.append(f"• **Source File:** `{meta.file_name}`")
+                        details_lines.append(f"• **Quality / Resolution:** `{res_meta}`")
+                        details_lines.append(f"• **Source Size:** `{format_bytes(meta.file_size_bytes)}`")
+                        details_lines.append(f"• **Duration:** `{format_duration(meta.duration_seconds)}`")
+                        details_lines.append(f"• **Codecs:** `{v_codec} / {a_codec}`")
+                        details_lines.append(f"• **Bitrate:** `{meta.overall_bitrate_kbps} kbps`")
+                    if task_ctx.output_path and task_ctx.output_path.exists():
+                        try:
+                            out_size = os.path.getsize(task_ctx.output_path)
+                            details_lines.append(f"• **Target Output:** `{task_ctx.output_path.name}` ({format_bytes(out_size)})")
+                        except Exception:
+                            pass
+                    details_block = "\n".join(details_lines)
+                    confirm_text = format_confirm_stop_prompt(
+                        stage_label=f"Uploading {target_fmt.upper()}",
+                        live_progress_text=live_progress,
+                        details_block=details_block
+                    )
+                    await updater.update(confirm_text, buttons=build_confirm_stop_task_menu(task_id))
+                    return
 
                 text = format_progress_status(
                     action_label=f"**Uploading {target_fmt.upper()} to Telegram:**",

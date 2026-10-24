@@ -16,8 +16,8 @@ from core.probe import probe_media
 from core.hardware import current_hardware
 from core.terminal import term_log
 from database.models import upsert_user
-from bot.keyboards import build_main_menu, build_task_progress_menu
-from bot.progress import ThrottledMessageUpdater, format_progress_status
+from bot.keyboards import build_main_menu, build_task_progress_menu, build_confirm_stop_task_menu
+from bot.progress import ThrottledMessageUpdater, format_progress_status, format_confirm_stop_prompt, make_progress_bar
 from bot.task_manager import task_manager, TaskContext
 
 logger = logging.getLogger(__name__)
@@ -108,9 +108,6 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
         nonlocal last_term_log
         if task_ctx.is_cancelled:
             raise asyncio.CancelledError()
-        if task_ctx.is_confirming_stop:
-            return  # do not overwrite confirmation prompt
-
         now = time.time()
         percent = (current_bytes / total_bytes * 100) if total_bytes > 0 else 0
         speed_mb = (current_bytes / max(0.1, now - start_time)) / (1024 * 1024)
@@ -118,6 +115,27 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
         if now - last_term_log >= 0.15:
             last_term_log = now
             term_log("DOWNLOAD", f"Downloading {clean_name}", task_id=task_id, progress=percent, extra=f"{speed_mb:.1f} MB/s", live=True)
+
+        if task_ctx.is_confirming_stop:
+            bar = make_progress_bar(percent)
+            cur_mb = current_bytes / (1024 * 1024)
+            tot_mb = total_bytes / (1024 * 1024)
+            rem_bytes = max(0, total_bytes - current_bytes)
+            speed_bytes = current_bytes / max(0.1, now - start_time)
+            eta = int(rem_bytes / speed_bytes) if speed_bytes > 0 else 0
+            live_progress = (
+                f"• **Progress:** {bar}\n"
+                f"• **Downloaded:** `{cur_mb:.1f} MB / {tot_mb:.1f} MB`\n"
+                f"• **Speed:** `{speed_mb:.1f} MB/s` | **ETA:** `{eta}s`"
+            )
+            details_block = f"• **Incoming File:** `{clean_name}`\n• **Total Size:** `{tot_mb:.1f} MB`"
+            text = format_confirm_stop_prompt(
+                stage_label="Downloading Video",
+                live_progress_text=live_progress,
+                details_block=details_block
+            )
+            await updater.update(text, buttons=build_confirm_stop_task_menu(task_id))
+            return
 
         text = format_progress_status(
             action_label="**Downloading Video from Telegram:**",
