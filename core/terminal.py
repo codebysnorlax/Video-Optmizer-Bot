@@ -5,8 +5,9 @@ Supports in-place dynamic spinner line updates (\r\033[K) so progress does not s
 
 import sys
 import time
+import asyncio
 import logging
-from typing import Optional
+from typing import Optional, Dict, Any
 
 # ANSI Color Codes
 RESET = "\033[0m"
@@ -33,23 +34,103 @@ BOLD_WHITE = "\033[1;37m"
 SPINNER_FRAMES = ["⣾", "⣽", "⣻", "⢿", "⡿", "⣟", "⣯", "⣷"]
 _spinner_idx = 0
 _is_live = False
+_live_data: Optional[Dict[str, Any]] = None
+_spinner_task: Optional[asyncio.Task] = None
 
 
 def get_spinner() -> str:
-    """Returns the next Braille spinner frame."""
+    """Returns the next Braille spinner frame advancing at high speed."""
     global _spinner_idx
     char = SPINNER_FRAMES[_spinner_idx % len(SPINNER_FRAMES)]
     _spinner_idx += 1
     return char
 
 
+def _format_line(
+    stage: str,
+    message: str,
+    task_id: Optional[str] = None,
+    progress: Optional[float] = None,
+    extra: Optional[str] = None,
+    spinner: Optional[str] = None
+) -> str:
+    timestamp = time.strftime("%H:%M:%S")
+    sp = spinner or get_spinner()
+    stage_upper = stage.upper().strip()
+
+    # Stage color styles
+    if stage_upper in ("RECEIVE", "DOWNLOAD"):
+        badge = f"{BOLD_CYAN}[RECEIVE]{RESET}"
+        icon = f"{BOLD_CYAN}{sp}{RESET}"
+    elif stage_upper in ("PROBE", "INSPECT"):
+        badge = f"{BOLD_BLUE}[PROBE]  {RESET}"
+        icon = f"{BOLD_BLUE}{sp}{RESET}"
+    elif stage_upper in ("PROCESS", "OPTIMIZE", "TRANSCODE", "CONVERT"):
+        badge = f"{BOLD_YELLOW}[PROCESS]{RESET}"
+        icon = f"{BOLD_YELLOW}{sp}{RESET}"
+    elif stage_upper in ("UPLOAD", "SEND"):
+        badge = f"{BOLD_MAGENTA}[UPLOAD] {RESET}"
+        icon = f"{BOLD_MAGENTA}{sp}{RESET}"
+    elif stage_upper in ("SUCCESS", "DONE", "DELIVERED"):
+        badge = f"{BOLD_GREEN}[DONE]   {RESET}"
+        icon = f"{BOLD_GREEN}OK{RESET}"
+    elif stage_upper in ("CLEANUP", "DELETE", "STORAGE"):
+        badge = f"{CYAN}[STORAGE]{RESET}"
+        icon = f"{CYAN}*{RESET}"
+    elif stage_upper in ("ERROR", "FAIL"):
+        badge = f"{BOLD_RED}[ERROR]  {RESET}"
+        icon = f"{BOLD_RED}X{RESET}"
+    else:
+        badge = f"{BOLD_WHITE}[{stage_upper:<7}]{RESET}"
+        icon = f"{sp}"
+
+    task_tag = f"{BOLD_WHITE}[{task_id}]{RESET} " if task_id else ""
+    prog_str = f" {BOLD_YELLOW}{progress:.1f}%{RESET}" if progress is not None else ""
+    extra_str = f" ({DIM}{extra}{RESET})" if extra else ""
+
+    return f"{DIM}{timestamp}{RESET} {badge} {icon} {task_tag}{message}{prog_str}{extra_str}"
+
+
+async def _fast_spinner_loop() -> None:
+    """Async background task that keeps the terminal spinner animating smoothly and quickly (~14 fps)."""
+    global _is_live, _live_data, _spinner_task
+    try:
+        while _is_live and _live_data is not None:
+            await asyncio.sleep(0.07)  # 70ms = fast, energetic, silky-smooth spin
+            if not _is_live or _live_data is None:
+                break
+            line = _format_line(
+                stage=_live_data["stage"],
+                message=_live_data["message"],
+                task_id=_live_data["task_id"],
+                progress=_live_data["progress"],
+                extra=_live_data["extra"]
+            )
+            try:
+                sys.stdout.write(f"\r\033[K{line}")
+                sys.stdout.flush()
+            except Exception:
+                pass
+    except asyncio.CancelledError:
+        pass
+    finally:
+        _spinner_task = None
+
+
 def clear_live_line() -> None:
     """Clears the live in-place progress line if active."""
-    global _is_live
+    global _is_live, _live_data, _spinner_task
     if _is_live:
-        sys.stdout.write("\r\033[K")
-        sys.stdout.flush()
         _is_live = False
+        _live_data = None
+        if _spinner_task is not None and not _spinner_task.done():
+            _spinner_task.cancel()
+            _spinner_task = None
+        try:
+            sys.stdout.write("\r\033[K")
+            sys.stdout.flush()
+        except Exception:
+            pass
 
 
 class ColoredLogFormatter(logging.Formatter):
@@ -90,58 +171,33 @@ def term_log(
     """
     Prints a colorful, well-structured process log line to the terminal.
     When live=True, it updates the same line in-place using carriage returns (\r\033[K)
-    and spins the Braille character without appending endless lines!
+    and spins the Braille character quickly and continuously (~14 fps)!
     """
-    global _is_live
-    timestamp = time.strftime("%H:%M:%S")
-    spinner = get_spinner()
+    global _is_live, _live_data, _spinner_task
     
-    stage_upper = stage.upper().strip()
-    
-    # Stage color styles
-    if stage_upper in ("RECEIVE", "DOWNLOAD"):
-        badge = f"{BOLD_CYAN}[RECEIVE]{RESET}"
-        icon = f"{BOLD_CYAN}{spinner}{RESET}"
-    elif stage_upper in ("PROBE", "INSPECT"):
-        badge = f"{BOLD_BLUE}[PROBE]  {RESET}"
-        icon = f"{BOLD_BLUE}{spinner}{RESET}"
-    elif stage_upper in ("PROCESS", "OPTIMIZE", "TRANSCODE", "CONVERT"):
-        badge = f"{BOLD_YELLOW}[PROCESS]{RESET}"
-        icon = f"{BOLD_YELLOW}{spinner}{RESET}"
-    elif stage_upper in ("UPLOAD", "SEND"):
-        badge = f"{BOLD_MAGENTA}[UPLOAD] {RESET}"
-        icon = f"{BOLD_MAGENTA}{spinner}{RESET}"
-    elif stage_upper in ("SUCCESS", "DONE", "DELIVERED"):
-        badge = f"{BOLD_GREEN}[DONE]   {RESET}"
-        icon = f"{BOLD_GREEN}OK{RESET}"
-    elif stage_upper in ("CLEANUP", "DELETE", "STORAGE"):
-        badge = f"{CYAN}[STORAGE]{RESET}"
-        icon = f"{CYAN}*{RESET}"
-    elif stage_upper in ("ERROR", "FAIL"):
-        badge = f"{BOLD_RED}[ERROR]  {RESET}"
-        icon = f"{BOLD_RED}X{RESET}"
-    else:
-        badge = f"{BOLD_WHITE}[{stage_upper:<7}]{RESET}"
-        icon = f"{spinner}"
-
-    task_tag = f"{BOLD_WHITE}[{task_id}]{RESET} " if task_id else ""
-    
-    prog_str = ""
-    if progress is not None:
-        prog_str = f" {BOLD_YELLOW}{progress:.1f}%{RESET}"
-
-    extra_str = f" ({DIM}{extra}{RESET})" if extra else ""
-
-    line = f"{DIM}{timestamp}{RESET} {badge} {icon} {task_tag}{message}{prog_str}{extra_str}"
+    line = _format_line(stage, message, task_id, progress, extra)
     
     if live:
+        _live_data = {
+            "stage": stage,
+            "message": message,
+            "task_id": task_id,
+            "progress": progress,
+            "extra": extra
+        }
+        _is_live = True
         sys.stdout.write(f"\r\033[K{line}")
         sys.stdout.flush()
-        _is_live = True
+
+        # Start or resume fast background spinner loop if in an active event loop
+        try:
+            loop = asyncio.get_running_loop()
+            if _spinner_task is None or _spinner_task.done():
+                _spinner_task = loop.create_task(_fast_spinner_loop())
+        except RuntimeError:
+            pass
     else:
-        if _is_live:
-            sys.stdout.write("\r\033[K")
-            _is_live = False
+        clear_live_line()
         print(line, flush=True)
 
 
