@@ -43,6 +43,7 @@ from bot.keyboards import (
     build_convert_menu,
     build_cleanup_original_menu,
     build_cleanup_output_menu,
+    build_cleanup_finished_menu,
     build_files_list_menu,
     build_file_action_menu,
     build_recall_progress_menu,
@@ -62,6 +63,44 @@ from bot.progress import (
 from bot.task_manager import task_manager, TaskContext, RecallContext
 
 logger = logging.getLogger(__name__)
+
+
+def extract_report_header(text: Any) -> str:
+    """Extracts the full report and quality specifications before any cleanup section."""
+    if not isinstance(text, str) or not text.strip():
+        return ""
+    markers = [
+        "\n**Step 1 of 2",
+        "**Step 1 of 2",
+        "\nStep 1 of 2",
+        "Step 1 of 2",
+        "\n**Step 2 of 2",
+        "**Step 2 of 2",
+        "\nStep 2 of 2",
+        "Step 2 of 2",
+        "\n**Server Storage Cleanup",
+        "**Server Storage Cleanup",
+        "\nServer Storage Cleanup",
+        "Server Storage Cleanup"
+    ]
+    for marker in markers:
+        if marker in text:
+            return text.split(marker)[0].strip()
+    return text.strip()
+
+
+async def _delayed_hide_buttons(msg: Any, delay: float = 5.0) -> None:
+    """Waits for delay seconds, then removes inline buttons so options get cleanly hidden."""
+    if not msg:
+        return
+    await asyncio.sleep(delay)
+    try:
+        if hasattr(msg, "edit"):
+            res = msg.edit(buttons=None)
+            if asyncio.iscoroutine(res):
+                await res
+    except Exception:
+        pass
 
 
 async def get_or_restore_task_ctx(task_id: str, event: events.CallbackQuery.Event) -> Optional[TaskContext]:
@@ -311,6 +350,8 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
 
         in_path = cache.get("input_path")
         orig_name = Path(in_path).name if in_path else "original_video"
+        raw_msg_text = getattr(getattr(event, "message", None), "text", "")
+        header = extract_report_header(raw_msg_text)
 
         if action_type == "del_orig":
             if in_path and os.path.exists(in_path):
@@ -334,13 +375,16 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         if not out_path or not os.path.exists(out_path):
             task_manager.remove_task(task_id)
             final_text = (
+                f"{header}\n\n" if header else ""
+            ) + (
                 "**Server Storage Cleanup Complete:**\n\n"
                 f"• **Original File:** `{orig_name}` -> {orig_status}\n\n"
                 f"**Current Server Free Space:** `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
                 "All set! Ready for your next video."
             )
-            await event.edit(final_text, buttons=None)
+            await event.edit(final_text, buttons=build_cleanup_finished_menu(task_id))
             await event.answer(alert_msg, alert=False)
+            asyncio.create_task(_delayed_hide_buttons(event.message, delay=5.0))
             return
 
         opt_name = Path(out_path).name if out_path else "processed_video"
@@ -348,6 +392,8 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         opt_size_str = format_bytes(opt_size)
 
         step2_text = (
+            f"{header}\n\n" if header else ""
+        ) + (
             f"**Step 1 of 2 Complete:**\n"
             f"• **Original File:** `{orig_name}` ({orig_status})\n\n"
             "**Step 2 of 2: Processed File Cleanup**\n"
@@ -369,6 +415,8 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
 
         out_path = cache.get("output_path")
         opt_name = Path(out_path).name if out_path else "processed_video"
+        raw_msg_text = getattr(getattr(event, "message", None), "text", "")
+        header = extract_report_header(raw_msg_text)
 
         if action_type == "del_opt":
             if out_path and os.path.exists(out_path):
@@ -395,17 +443,30 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         disk = settings.get_disk_usage()
 
         final_text = (
+            f"{header}\n\n" if header else ""
+        ) + (
             "**Server Storage Cleanup Complete:**\n\n"
             f"• **Original File:** `{orig_name}` -> {orig_status}\n"
             f"• **Processed File:** `{opt_name}` -> {opt_status}\n\n"
             f"**Current Server Free Space:** `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
             "All set! Ready for your next video."
         )
-        await event.edit(final_text, buttons=None)
+        await event.edit(final_text, buttons=build_cleanup_finished_menu(task_id))
         await event.answer(alert_msg, alert=False)
+        asyncio.create_task(_delayed_hide_buttons(event.message, delay=5.0))
         return
 
-    # 5c. Try Another Optimization / Change with cached original file
+    # 5c. Done button (hide options and preserve all details)
+    if action_type == "done_cleanup":
+        task_id = parts[1]
+        try:
+            await event.edit(buttons=None)
+        except Exception:
+            pass
+        await event.answer("Options hidden. Report details preserved.", alert=False)
+        return
+
+    # 5d. Try Another Optimization / Change with cached original file
     if action_type == "retry_opt":
         task_id = parts[1]
         task_ctx = await get_or_restore_task_ctx(task_id, event)
@@ -421,9 +482,9 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         summary = task_ctx.meta.get_summary_card(current_hardware.description)
         menu = build_main_menu(task_id)
 
-        # Delete the previous reply/cleanup prompt so Telegram does not display the quote of the processed video
+        # Keep the report message intact in chat history, just dismiss its buttons
         try:
-            await event.delete()
+            await event.edit(buttons=None)
         except Exception:
             pass
 

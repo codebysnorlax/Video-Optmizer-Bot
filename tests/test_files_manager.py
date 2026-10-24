@@ -70,12 +70,31 @@ def test_optimize_menu():
     assert b"opt_run:auto_less:task_abc" in auto_menu[1][0].type.data
     assert b"opt_menu:task_abc" in auto_menu[2][0].type.data
 
-    from bot.keyboards import build_cleanup_original_menu, build_cleanup_output_menu
+    from bot.keyboards import build_cleanup_original_menu, build_cleanup_output_menu, build_cleanup_finished_menu
     clean_orig = build_cleanup_original_menu("task_abc")
     assert any(b"retry_opt:task_abc" in btn.type.data for row in clean_orig for btn in row)
+    assert any(b"done_cleanup:task_abc" in btn.type.data for row in clean_orig for btn in row)
 
     clean_out = build_cleanup_output_menu("task_abc")
     assert any(b"retry_opt:task_abc" in btn.type.data for row in clean_out for btn in row)
+    assert any(b"done_cleanup:task_abc" in btn.type.data for row in clean_out for btn in row)
+
+    clean_fin = build_cleanup_finished_menu("task_abc")
+    assert any(b"retry_opt:task_abc" in btn.type.data for row in clean_fin for btn in row)
+    assert any(b"done_cleanup:task_abc" in btn.type.data for row in clean_fin for btn in row)
+
+    from bot.callbacks import extract_report_header
+    dummy_report = (
+        "**Auto Recommended Complete!**\n"
+        "• Quality: 1080p FHD\n"
+        "• Duration: 00:30\n\n"
+        "Step 1 of 2: Original File Cleanup\n"
+        "• Original Source File: test.mp4"
+    )
+    extracted = extract_report_header(dummy_report)
+    assert "**Auto Recommended Complete!**" in extracted
+    assert "• Quality: 1080p FHD" in extracted
+    assert "Step 1 of 2" not in extracted
 
 
 def test_recall_task_manager():

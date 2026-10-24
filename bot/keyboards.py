@@ -78,6 +78,9 @@ def build_cleanup_original_menu(task_id: str) -> List[List[Button]]:
         ],
         [
             Button.inline("Try Another Optimization / Change", data=f"retry_opt:{task_id}".encode())
+        ],
+        [
+            Button.inline("Done", data=f"done_cleanup:{task_id}".encode())
         ]
     ]
 
@@ -91,6 +94,21 @@ def build_cleanup_output_menu(task_id: str) -> List[List[Button]]:
         ],
         [
             Button.inline("Try Another Optimization / Change", data=f"retry_opt:{task_id}".encode())
+        ],
+        [
+            Button.inline("Done", data=f"done_cleanup:{task_id}".encode())
+        ]
+    ]
+
+
+def build_cleanup_finished_menu(task_id: str) -> List[List[Button]]:
+    """Builds post-cleanup menu allowing user to try another optimization or dismiss."""
+    return [
+        [
+            Button.inline("Try Another Optimization / Change", data=f"retry_opt:{task_id}".encode())
+        ],
+        [
+            Button.inline("Done", data=f"done_cleanup:{task_id}".encode())
         ]
     ]
 

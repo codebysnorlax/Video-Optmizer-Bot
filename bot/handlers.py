@@ -67,6 +67,14 @@ async def build_start_dashboard(user_id: int, user_name: str) -> tuple[str, list
     return text, buttons
 
 
+async def _safe_delete_incoming_command(event: events.NewMessage.Event) -> None:
+    """Removes the user's incoming '/' command message for a cleaner chat interface."""
+    try:
+        await event.delete()
+    except Exception:
+        pass
+
+
 async def handle_start(event: events.NewMessage.Event) -> None:
     """Handles /start command."""
     user = await event.get_sender()
@@ -75,7 +83,8 @@ async def handle_start(event: events.NewMessage.Event) -> None:
     await upsert_user(event.sender_id, username, first_name)
 
     text, buttons = await build_start_dashboard(event.sender_id, first_name)
-    await event.reply(text, buttons=buttons)
+    await event.respond(text, buttons=buttons)
+    await _safe_delete_incoming_command(event)
 
 
 async def handle_help(event: events.NewMessage.Event) -> None:
@@ -100,7 +109,8 @@ async def handle_help(event: events.NewMessage.Event) -> None:
         "• `/history` - View your recent tasks\n"
         "• `/storage` - Check host disk space & active temporary cache"
     )
-    await event.reply(text)
+    await event.respond(text)
+    await _safe_delete_incoming_command(event)
 
 
 async def handle_hardware(event: events.NewMessage.Event) -> None:
@@ -118,7 +128,8 @@ async def handle_hardware(event: events.NewMessage.Event) -> None:
         f"• **Primary Codec:** `{current_hardware.video_encoder}`\n\n"
         f"• **Server Storage:** `{disk['free_gb']} GB free / {disk['total_gb']} GB total` ({disk['percent_used']}% used)"
     )
-    await event.reply(text)
+    await event.respond(text)
+    await _safe_delete_incoming_command(event)
 
 
 async def handle_stats(event: events.NewMessage.Event) -> None:
@@ -145,7 +156,8 @@ async def handle_stats(event: events.NewMessage.Event) -> None:
         f"• **Average Processing Time:** `{avg_time:.1f}s`\n\n"
         f"• **Server Disk Status:** `{disk['free_gb']} GB free / {disk['total_gb']} GB total`"
     )
-    await event.reply(text)
+    await event.respond(text)
+    await _safe_delete_incoming_command(event)
 
 
 async def handle_history(event: events.NewMessage.Event) -> None:
@@ -154,7 +166,8 @@ async def handle_history(event: events.NewMessage.Event) -> None:
     tasks = await get_user_recent_tasks(user_id, limit=5)
     
     if not tasks:
-        await event.reply("You have no processing history yet. Send a video to get started.")
+        await event.respond("You have no processing history yet. Send a video to get started.")
+        await _safe_delete_incoming_command(event)
         return
 
     lines = ["**Your Recent Processing History:**\n"]
@@ -165,7 +178,8 @@ async def handle_history(event: events.NewMessage.Event) -> None:
             f"   • **Action:** `{t['action']}` | **Date:** `{t['created_at']}`\n"
             f"   • **Size:** `{format_bytes(t['input_size'])}` -> `{format_bytes(t['output_size'])}`"
         )
-    await event.reply("\n".join(lines))
+    await event.respond("\n".join(lines))
+    await _safe_delete_incoming_command(event)
 
 
 async def handle_storage(event: events.NewMessage.Event) -> None:
@@ -183,7 +197,8 @@ async def handle_storage(event: events.NewMessage.Event) -> None:
         f"• Outputs folder: `{format_bytes(out_size)}`\n\n"
         "Use `/files` to view, recall, or delete individual cached files."
     )
-    await event.reply(text)
+    await event.respond(text)
+    await _safe_delete_incoming_command(event)
 
 
 async def handle_files(event: events.NewMessage.Event) -> None:
@@ -199,7 +214,8 @@ async def handle_files(event: events.NewMessage.Event) -> None:
             "All past files have either been deleted or cleaned up.\n\n"
             f"• **Server Free Space:** `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)"
         )
-        await event.reply(text)
+        await event.respond(text)
+        await _safe_delete_incoming_command(event)
         return
 
     total_size = sum(f["size"] for f in files)
@@ -210,4 +226,5 @@ async def handle_files(event: events.NewMessage.Event) -> None:
         "Select any file below to **Recall** (send back to you) or **Delete** from server:"
     )
     menu = build_files_list_menu(files, page=0)
-    await event.reply(text, buttons=menu)
+    await event.respond(text, buttons=menu)
+    await _safe_delete_incoming_command(event)
