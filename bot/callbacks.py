@@ -31,7 +31,8 @@ from database.models import (
     mark_output_file_deleted,
     mark_file_cache_deleted,
     get_user_cached_files,
-    get_single_cached_file
+    get_single_cached_file,
+    get_user_stats
 )
 from bot.keyboards import (
     build_main_menu,
@@ -112,6 +113,88 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
     data = event.data.decode(errors="ignore")
     parts = data.split(":")
     action_type = parts[0]
+
+    # 0. Start Dashboard Navigation Callbacks
+    if action_type == "dash_home":
+        from bot.handlers import build_start_dashboard
+        user_id = event.sender_id
+        user = await event.get_sender()
+        first_name = getattr(user, "first_name", "") or ""
+        text, buttons = await build_start_dashboard(user_id, first_name)
+        await event.edit(text, buttons=buttons)
+        await event.answer()
+        return
+
+    if action_type == "dash_stats":
+        user_id = event.sender_id
+        stats = await get_user_stats(user_id)
+        disk = settings.get_disk_usage()
+        total_tasks = stats.get("total_tasks") or 0
+        successful = stats.get("successful_tasks") or 0
+        in_bytes = stats.get("total_input_bytes") or 0
+        out_bytes = stats.get("total_output_bytes") or 0
+        avg_time = stats.get("avg_time") or 0.0
+        saved_bytes = max(0, in_bytes - out_bytes)
+        ratio = (saved_bytes / in_bytes * 100) if in_bytes > 0 else 0
+
+        text = (
+            "**Your Video Optimization Statistics**\n\n"
+            f"• **Total Tasks:** `{total_tasks}` (`{successful}` completed)\n"
+            f"• **Total Input Data:** `{format_bytes(in_bytes)}`\n"
+            f"• **Total Output Data:** `{format_bytes(out_bytes)}`\n"
+            f"• **Total Bandwidth Saved:** `{format_bytes(saved_bytes)}` ({ratio:.1f}%)\n"
+            f"• **Average Processing Time:** `{avg_time:.1f}s`\n\n"
+            f"• **Server Storage:** `{disk['free_gb']} GB free / {disk['total_gb']} GB total`"
+        )
+        buttons = [
+            [Button.inline("< Back to Dashboard", data=b"dash_home")]
+        ]
+        await event.edit(text, buttons=buttons)
+        await event.answer()
+        return
+
+    if action_type == "dash_hw":
+        disk = settings.get_disk_usage()
+        text = (
+            "**Host Hardware & Platform Diagnostics**\n\n"
+            f"• **OS:** `{current_hardware.os_name}`\n"
+            f"• **Architecture:** `{current_hardware.arch}`\n"
+            f"• **Termux Mobile Server:** `{'Yes' if current_hardware.is_termux else 'No'}`\n"
+            f"• **CPU Model:** `{current_hardware.cpu_model}`\n"
+            f"• **CPU Cores:** `{current_hardware.cpu_cores} active threads`\n"
+            f"• **RAM Usage:** `{current_hardware.available_ram_mb} MB free / {current_hardware.total_ram_mb} MB total`\n"
+            f"• **Hardware Acceleration:** `{current_hardware.description}`\n"
+            f"• **Primary Codec:** `{current_hardware.video_encoder}`\n\n"
+            f"• **Server Storage:** `{disk['free_gb']} GB free / {disk['total_gb']} GB total` ({disk['percent_used']}% used)"
+        )
+        buttons = [
+            [Button.inline("< Back to Dashboard", data=b"dash_home")]
+        ]
+        await event.edit(text, buttons=buttons)
+        await event.answer()
+        return
+
+    if action_type == "dash_help":
+        text = (
+            "**How to Use Video Optimizer Bot:**\n\n"
+            "1. **Send Any Video:** Send or forward any video file or clip (up to 2,000 MB).\n"
+            "2. **Instant Media Analysis:** The bot immediately probes resolution, duration, codecs, framerate, and bitrate.\n"
+            "3. **Choose Your Action:**\n"
+            "   • **1. Convert to 720p:** Caps >720p at 720p HD (never upscales), caps >60fps at 60fps for budget & older phones.\n"
+            "   • **2. Convert to 1080p:** Caps >1080p at 1080p FHD (never upscales), caps >60fps at 60fps for mid-range phones.\n"
+            "   • **3. Auto Recommended (Smart Fix):** Universal mobile compatibility, downscales 4K/2K to 1080p FHD to eliminate mobile lag and thermal stutter, outputs buttery smooth HD video.\n"
+            "   • **Smartphone Audio Fix (AAC):** Fast untouched video copy + universal AAC stereo audio in ~1s.\n"
+            "   • **Format Conversion:** Transcode to MP4, MKV, WEBM, AVI, MOV, MPG or extract MP3 / AAC audio.\n"
+            "4. **Live Progress:** Watch download, transcoding, and upload progress in real-time.\n"
+            "5. **Interactive Cleanup & Re-Optimization:** Delete files from server or try another preset directly from the pristine original source.\n\n"
+            "**Send any video to begin!**"
+        )
+        buttons = [
+            [Button.inline("< Back to Dashboard", data=b"dash_home")]
+        ]
+        await event.edit(text, buttons=buttons)
+        await event.answer()
+        return
 
     # 1. AI Manual Notice
     if action_type == "ai_manual":

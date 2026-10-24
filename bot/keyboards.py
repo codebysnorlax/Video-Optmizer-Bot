@@ -121,7 +121,10 @@ def build_files_list_menu(files: list, page: int = 0, page_size: int = 5) -> Lis
     if nav_row:
         buttons.append(nav_row)
 
-    buttons.append([Button.inline("Refresh List", data=f"flist:{page}".encode())])
+    buttons.append([
+        Button.inline("Refresh List", data=f"flist:{page}".encode()),
+        Button.inline("< Dashboard", data=b"dash_home")
+    ])
     return buttons
 
 

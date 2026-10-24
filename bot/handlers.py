@@ -2,7 +2,7 @@
 Command Handlers (/start, /help, /hardware, /stats, /history)
 """
 
-from telethon import events
+from telethon import events, Button
 from config.settings import settings
 from core.hardware import current_hardware
 from core.probe import format_bytes
@@ -15,50 +15,90 @@ from database.models import (
 from bot.keyboards import build_files_list_menu
 
 
+async def build_start_dashboard(user_id: int, user_name: str) -> tuple[str, list]:
+    """Generates the text and interactive keyboard for the /start dashboard."""
+    stats = await get_user_stats(user_id)
+    disk = settings.get_disk_usage()
+
+    total_tasks = stats.get("total_tasks") or 0
+    successful = stats.get("successful_tasks") or 0
+    in_bytes = stats.get("total_input_bytes") or 0
+    out_bytes = stats.get("total_output_bytes") or 0
+    saved_bytes = max(0, in_bytes - out_bytes)
+    ratio = (saved_bytes / in_bytes * 100) if in_bytes > 0 else 0
+
+    user_label = user_name if user_name else "User"
+
+    text = (
+        "**Video Optimizer & Converter Dashboard**\n\n"
+        f"Welcome, **{user_label}**.\n\n"
+        "**System Status & Environment:**\n"
+        f"• **Engine:** `{current_hardware.description}`\n"
+        f"• **Primary Encoder:** `{current_hardware.video_encoder}`\n"
+        f"• **Server Storage:** `{disk['free_gb']} GB free / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n"
+        f"• **Your Usage:** `{successful}` tasks completed | `{format_bytes(saved_bytes)}` bandwidth saved ({ratio:.1f}%)\n\n"
+        "**Available Processing Features:**\n\n"
+        "**1. Video Optimization:**\n"
+        " • `1. Convert to 720p`: Caps >720p at 720p HD (never upscales <=720p), caps >60fps at 60fps. Includes Keep Same Bitrate & Lesser Bitrate choices.\n"
+        " • `2. Convert to 1080p`: Caps >1080p at 1080p FHD (never upscales <=1080p), caps >60fps at 60fps. Includes Keep Same Bitrate & Lesser Bitrate choices.\n"
+        " • `3. Auto Recommended`: Smart automatic analyzer. Downscales heavy 4K/2K to 1080p FHD to eliminate mobile decoding lag, optimizes for smooth HD playback on all smartphones without size limits.\n\n"
+        "**2. Format Conversion & Audio Fix:**\n"
+        " • `Smartphone Audio Fix (AAC)`: Untouched video copy + universal stereo AAC fix in ~1s.\n"
+        " • `Transcode`: MP4, MKV, WEBM, AVI, MOV, MPG\n"
+        " • `Audio Extraction`: MP3, AAC\n\n"
+        "**3. Server File Management:**\n"
+        " • Automatic file deduplication (existing server videos are recognized and reused)\n"
+        " • Interactive 2-step cleanup after every delivery\n"
+        " • Re-optimize from pristine original source with one tap\n"
+        " • Manage and recall files anytime via `/files`\n\n"
+        "**Send or forward any video here to get started!**"
+    )
+
+    buttons = [
+        [
+            Button.inline("Server Files", data=b"flist:0"),
+            Button.inline("My Statistics", data=b"dash_stats")
+        ],
+        [
+            Button.inline("System Diagnostics", data=b"dash_hw"),
+            Button.inline("Help & Guide", data=b"dash_help")
+        ]
+    ]
+    return text, buttons
+
+
 async def handle_start(event: events.NewMessage.Event) -> None:
     """Handles /start command."""
     user = await event.get_sender()
-    await upsert_user(event.sender_id, getattr(user, "username", ""), getattr(user, "first_name", ""))
+    first_name = getattr(user, "first_name", "") or ""
+    username = getattr(user, "username", "") or ""
+    await upsert_user(event.sender_id, username, first_name)
 
-    text = (
-        "**Welcome to the Video Optimizer & Converter Bot**\n\n"
-        "Send or forward **any video format** to get started. The bot will analyze it and provide options:\n\n"
-        "**1. Optimize:**\n"
-        " • `Low Device`: Max playback compatibility on older phones and TVs\n"
-        " • `Moderate`: Balanced quality with mid-range bitrate\n"
-        " • `Auto Recommended`: Smart analyzer that fixes camera bitrate bloat (e.g. 500MB -> 18MB) with zero perceptual quality loss\n\n"
-        "**2. Convert & Audio Fix:**\n"
-        " • `Fix Audio`: Fast untouched stream copy with universal stereo AAC for smartphones\n"
-        " • Transcode to MP4, MKV, WEBM, AVI, MOV, MPG\n"
-        " • Extract audio to MP3, AAC, OGG, WAV\n\n"
-        "**3. Manage Cached Files:**\n"
-        " • Use `/files` to view, recall (re-download), or delete server cached videos\n\n"
-        f"**Engine:** Powered by `{current_hardware.description}`\n\n"
-        "**Drop or forward a video here to begin!**"
-    )
-    await event.reply(text)
+    text, buttons = await build_start_dashboard(event.sender_id, first_name)
+    await event.reply(text, buttons=buttons)
 
 
 async def handle_help(event: events.NewMessage.Event) -> None:
     """Handles /help command."""
     text = (
-        "**How to use Video Optimizer Bot:**\n\n"
-        "1. **Send any video:** Up to 2,000 MB (2 GB) supported!\n"
-        "2. **Review Analysis:** The bot immediately inspects resolution, duration, codecs, and bitrate.\n"
-        "3. **Select Action:**\n"
-        "   - **Optimize (Auto Recommended):** Best for camera videos. Shrinks file size up to 95% with pristine quality.\n"
-        "   - **Optimize (Low Device):** Guarantees smooth playback on budget phones and older TVs.\n"
-        "   - **Optimize (Moderate):** Balanced crisp profile.\n"
-        "   - **Fix Audio (Smartphone AAC):** Untouched video copy + universal AAC stereo fix in ~1s.\n"
-        "   - **Convert:** Transcode video containers or extract high-quality audio.\n"
+        "**How to Use Video Optimizer Bot:**\n\n"
+        "1. **Send Any Video:** Send or forward any video file or clip (up to 2,000 MB).\n"
+        "2. **Instant Media Analysis:** The bot immediately probes resolution, duration, codecs, framerate, and bitrate.\n"
+        "3. **Choose Your Action:**\n"
+        "   • **1. Convert to 720p:** Caps >720p at 720p HD (never upscales), caps >60fps at 60fps for budget & older phones.\n"
+        "   • **2. Convert to 1080p:** Caps >1080p at 1080p FHD (never upscales), caps >60fps at 60fps for mid-range phones.\n"
+        "   • **3. Auto Recommended (Smart Fix):** Universal mobile compatibility, downscales 4K/2K to 1080p FHD to eliminate mobile lag and thermal stutter, outputs buttery smooth HD video.\n"
+        "   • **Smartphone Audio Fix (AAC):** Fast untouched video copy + universal AAC stereo audio in ~1s.\n"
+        "   • **Format Conversion:** Transcode to MP4, MKV, WEBM, AVI, MOV, MPG or extract MP3 / AAC audio.\n"
         "4. **Live Progress:** Watch download, transcoding, and upload progress in real-time.\n"
-        "5. **Manage Server Files:** Use `/files` to view, recall, or permanently delete server files.\n\n"
-        "**Commands:**\n"
+        "5. **Interactive Cleanup & Re-Optimization:** Delete files from server or try another preset directly from the pristine original source.\n\n"
+        "**Available Commands:**\n"
+        "• `/start` - Open the main dashboard\n"
         "• `/files` - View, recall, or delete server cached files\n"
-        "• `/stats` - View your total saved bandwidth and usage\n"
-        "• `/hardware` - View host hardware acceleration & system info\n"
+        "• `/stats` - View your total saved bandwidth and usage statistics\n"
+        "• `/hardware` - View host hardware acceleration & system diagnostics\n"
         "• `/history` - View your recent tasks\n"
-        "• `/storage` - Check host disk space & active cache"
+        "• `/storage` - Check host disk space & active temporary cache"
     )
     await event.reply(text)
 

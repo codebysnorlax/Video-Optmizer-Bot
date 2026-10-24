@@ -175,3 +175,19 @@ async def test_get_or_restore_task_ctx(tmp_path, monkeypatch):
     assert restored_ctx.meta.width == 640
     assert restored_ctx.meta.height == 360
 
+
+@pytest.mark.asyncio
+async def test_start_dashboard():
+    from bot.handlers import build_start_dashboard
+    text, buttons = await build_start_dashboard(user_id=99999, user_name="Alex")
+    assert "Video Optimizer & Converter Dashboard" in text
+    assert "Alex" in text
+    assert "1. Convert to 720p" in text
+    assert "2. Convert to 1080p" in text
+    assert "3. Auto Recommended" in text
+    assert len(buttons) == 2
+    assert b"flist:0" in buttons[0][0].type.data
+    assert b"dash_stats" in buttons[0][1].type.data
+    assert b"dash_hw" in buttons[1][0].type.data
+    assert b"dash_help" in buttons[1][1].type.data
+
