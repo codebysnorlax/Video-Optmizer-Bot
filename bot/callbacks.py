@@ -672,9 +672,34 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             return
 
         recall_ctx.is_confirming_stop = True
+
+        details_lines = [
+            f"• **File Name:** `{recall_ctx.file_name}`",
+            f"• **File Size:** `{format_bytes(recall_ctx.file_size)}`",
+        ]
+        try:
+            if recall_ctx.file_path.exists():
+                meta = await probe_media(recall_ctx.file_path)
+                if meta.has_video:
+                    fps_str = f" @ {meta.fps:.2f}fps" if meta.fps else ""
+                    details_lines.append(f"• **Quality / Resolution:** `{meta.resolution_label}{fps_str}`")
+                    details_lines.append(f"• **Video Codec:** `{(meta.video_codec or 'unknown').upper()}`")
+                if meta.has_audio:
+                    details_lines.append(f"• **Audio Codec:** `{(meta.audio_codec or 'unknown').upper()}`")
+                if meta.duration_seconds > 0:
+                    details_lines.append(f"• **Duration:** `{format_duration(meta.duration_seconds)}`")
+                if meta.overall_bitrate_kbps > 0:
+                    details_lines.append(f"• **Bitrate:** `{meta.overall_bitrate_kbps} kbps`")
+        except Exception as e:
+            logger.debug(f"Could not probe recall file {recall_ctx.file_name}: {e}")
+
+        details_block = "\n".join(details_lines)
+
         confirm_text = (
             "**Confirm Stop Sending**\n\n"
-            f"Are you sure you want to stop sending **{recall_ctx.file_name}**?\n\n"
+            f"Are you 100% sure you want to stop sending **{recall_ctx.file_name}**?\n\n"
+            "**File & Quality Details:**\n"
+            f"{details_block}\n\n"
             "If stopped, the file transfer will be aborted immediately."
         )
         await event.edit(confirm_text, buttons=build_confirm_stop_menu(recall_id))
@@ -735,9 +760,42 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
 
         task_ctx.is_confirming_stop = True
         stage_name = task_ctx.active_stage_label or (task_ctx.current_stage.capitalize() if task_ctx.current_stage else "Processing")
+
+        details_lines = []
+        meta = task_ctx.meta
+        if not meta and task_ctx.input_path and task_ctx.input_path.exists():
+            try:
+                meta = await probe_media(task_ctx.input_path)
+                task_ctx.meta = meta
+            except Exception:
+                pass
+
+        if meta:
+            fps_str = f" @ {meta.fps:.2f}fps" if meta.fps else ""
+            res_str = f"{meta.resolution_label}{fps_str}" if meta.has_video else "Audio Only"
+            v_codec = (meta.video_codec or "unknown").upper() if meta.has_video else "None"
+            a_codec = (meta.audio_codec or "none").upper() if meta.has_audio else "None"
+
+            details_lines.append(f"• **Source File:** `{meta.file_name}`")
+            details_lines.append(f"• **Quality / Resolution:** `{res_str}`")
+            details_lines.append(f"• **Source Size:** `{format_bytes(meta.file_size_bytes)}`")
+            details_lines.append(f"• **Duration:** `{format_duration(meta.duration_seconds)}`")
+            details_lines.append(f"• **Codecs:** `{v_codec} / {a_codec}`")
+            details_lines.append(f"• **Bitrate:** `{meta.overall_bitrate_kbps} kbps`")
+
+        if task_ctx.output_path and task_ctx.output_path.exists():
+            try:
+                out_size = os.path.getsize(task_ctx.output_path)
+                details_lines.append(f"• **Target Output:** `{task_ctx.output_path.name}` ({format_bytes(out_size)})")
+            except Exception:
+                pass
+
+        details_block = "\n**File & Quality Details:**\n" + "\n".join(details_lines) + "\n" if details_lines else ""
+
         confirm_text = (
             "**Confirm Stop Active Process**\n\n"
-            f"Are you 100% sure you want to stop active **{stage_name}**?\n\n"
+            f"Are you 100% sure you want to stop active **{stage_name}**?\n"
+            f"{details_block}\n"
             f"If stopped, the current {stage_name.lower()} operation will be terminated immediately."
         )
         await event.edit(confirm_text, buttons=build_confirm_stop_task_menu(task_id))

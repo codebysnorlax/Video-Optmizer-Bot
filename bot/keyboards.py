@@ -156,7 +156,7 @@ def build_confirm_stop_menu(recall_id: str) -> List[List[Button]]:
     """Builds confirmation keyboard to verify user wants to stop transfer."""
     return [
         [
-            Button.inline("Yes, Stop Sending", data=f"yes_stop:{recall_id}".encode()),
+            Button.inline("Yes, 100% Sure - Stop Sending", data=f"yes_stop:{recall_id}".encode()),
             Button.inline("No, Continue Sending", data=f"no_stop:{recall_id}".encode())
         ]
     ]

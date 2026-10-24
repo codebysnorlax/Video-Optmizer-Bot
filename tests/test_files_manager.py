@@ -291,10 +291,14 @@ async def test_task_stop_callbacks(tmp_path, monkeypatch):
 
     await handle_callback_query(mock_event, client=MagicMock())
     assert task_ctx.is_confirming_stop is True
-    # Verify 100% sure prompt is displayed
+    # Verify 100% sure prompt is displayed with size and quality details
     edit_call_args = mock_event.edit.call_args[0][0]
     assert "Confirm Stop Active Process" in edit_call_args
     assert "100% sure" in edit_call_args
+    assert "File & Quality Details:" in edit_call_args
+    assert "1080p FHD" in edit_call_args
+    assert "Source Size:" in edit_call_args
+    assert "Codecs:" in edit_call_args
 
     # 2. User clicks no_stop_task (continue)
     mock_event.data = b"no_stop_task:task_stop_test"
@@ -325,4 +329,58 @@ async def test_task_stop_callbacks(tmp_path, monkeypatch):
     assert "H264" in edit_stop_text
     assert "AAC" in edit_stop_text
     assert "What would you like to do next?" in edit_stop_text
+
+
+@pytest.mark.asyncio
+async def test_recall_stop_callbacks(tmp_path):
+    from unittest.mock import AsyncMock, MagicMock
+    from bot.callbacks import handle_callback_query
+    from bot.task_manager import task_manager, RecallContext
+    import subprocess
+
+    dummy_video = tmp_path / "recall_test.mp4"
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", "testsrc=duration=1:size=1280x720:rate=30",
+        "-c:v", "libx264", str(dummy_video)
+    ]
+    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+
+    mock_upload_task = MagicMock()
+    mock_upload_task.done.return_value = False
+
+    recall_ctx = RecallContext(
+        recall_id="rec_test123",
+        user_id=12345,
+        task_id="task_rec",
+        file_type="processed",
+        file_path=dummy_video,
+        file_name="recall_test.mp4",
+        file_size=dummy_video.stat().st_size,
+        status_msg=MagicMock(),
+        upload_task=mock_upload_task
+    )
+    task_manager.register_recall(recall_ctx)
+
+    # 1. User taps stop_rec
+    mock_event = MagicMock()
+    mock_event.data = b"stop_rec:rec_test123"
+    mock_event.edit = AsyncMock()
+    mock_event.answer = AsyncMock()
+
+    await handle_callback_query(mock_event, client=MagicMock())
+    assert recall_ctx.is_confirming_stop is True
+    confirm_text = mock_event.edit.call_args[0][0]
+    assert "Confirm Stop Sending" in confirm_text
+    assert "File & Quality Details:" in confirm_text
+    assert "Quality / Resolution:" in confirm_text
+    assert "720p HD" in confirm_text
+    assert "File Size:" in confirm_text
+
+    # 2. User taps yes_stop
+    mock_event.data = b"yes_stop:rec_test123"
+    await handle_callback_query(mock_event, client=MagicMock())
+    mock_upload_task.cancel.assert_called_once()
+    assert recall_ctx.is_cancelled is True
+
 
