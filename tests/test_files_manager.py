@@ -45,7 +45,7 @@ def test_optimize_menu():
     assert len(menu) == 4  # 3 options + back button
     assert b"opt_sub:720:task_abc" in menu[0][0].type.data
     assert b"opt_sub:1080:task_abc" in menu[1][0].type.data
-    assert b"opt_sub:auto:task_abc" in menu[2][0].type.data
+    assert b"opt_run:auto:task_abc" in menu[2][0].type.data
     assert b"main_menu:task_abc" in menu[3][0].type.data
 
     from bot.keyboards import build_bitrate_choice_menu, build_auto_recommended_menu

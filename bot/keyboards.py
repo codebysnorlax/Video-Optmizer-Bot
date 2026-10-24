@@ -24,7 +24,7 @@ def build_optimize_menu(task_id: str) -> List[List[Button]]:
     return [
         [Button.inline("1. Convert to 720p", data=f"opt_sub:720:{task_id}".encode())],
         [Button.inline("2. Convert to 1080p", data=f"opt_sub:1080:{task_id}".encode())],
-        [Button.inline("3. Auto Recommended (Smart Fix)", data=f"opt_sub:auto:{task_id}".encode())],
+        [Button.inline("3. Auto Recommended (Smart Fix)", data=f"opt_run:auto:{task_id}".encode())],
         [Button.inline("< Back to Main Menu", data=f"main_menu:{task_id}".encode())]
     ]
 

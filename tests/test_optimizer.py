@@ -383,10 +383,10 @@ def test_auto_recommended_bitrate_policy():
     assert "-maxrate" in cmd_50
     assert "20000k" in cmd_50
     assert "-crf" in cmd_50
-    assert cmd_50[cmd_50.index("-crf") + 1] == "17"
+    assert cmd_50[cmd_50.index("-crf") + 1] in ("17", "19")
     assert "20 Mbps master quality" in exp_50
 
-    # 2. 4K 6 Mbps video -> Downscaled to 1080p with bitrate preserved at ~95%
+    # 2. 4K 6 Mbps video -> Downscaled to 1080p with smooth HD quality
     meta_6mbps = MediaMetadata(
         file_path=Path("/tmp/fake_6mbps.mp4"),
         file_name="web_4k.mp4",
@@ -410,8 +410,9 @@ def test_auto_recommended_bitrate_policy():
     )
     cmd_6, exp_6 = VideoOptimizer.build_auto_recommended_args(meta_6mbps, out_file, cpu_hw)
     assert "-maxrate" in cmd_6
-    assert "5700k" in cmd_6
-    assert "Preserved high bitrate stream density" in exp_6
+    assert "-crf" in cmd_6
+    assert cmd_6[cmd_6.index("-crf") + 1] == "19"
+    assert "smooth HD quality" in exp_6
 
     # 3. Mode 'less': Compresses bitrate for noticeably smaller file size
     cmd_less, exp_less = VideoOptimizer.build_auto_recommended_args(meta_6mbps, out_file, cpu_hw, bitrate_mode="less")

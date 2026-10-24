@@ -142,12 +142,12 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             "**Select Optimization Mode:**\n\n"
             "**1. Convert to 720p:** Downscales >720p to 720p (never upscales <=720p), caps >60fps at 60fps, smooth playback for older & budget phones.\n"
             "**2. Convert to 1080p:** Downscales >1080p to 1080p (never upscales <=1080p), caps >60fps at 60fps, high clarity for mid-range smartphones.\n"
-            "**3. Auto Recommended (Smart Fix):** Universal smartphone compatibility, caps >1080p at 1080p, fixes audio issues, balanced size & smoothness."
+            "**3. Auto Recommended (Smart Fix):** Universal smartphone compatibility, caps >1080p at 1080p FHD, auto-calibrates for smoothest HD playback on all devices."
         )
         await event.edit(text, buttons=menu)
         return
 
-    # 3b. Optimization Bitrate Preference Menu (All Modes)
+    # 3b. Optimization Bitrate Preference Menu (for 720p and 1080p)
     if action_type in ("opt_sub", "opt_auto_menu"):
         sub_type = parts[1] if action_type == "opt_sub" else "auto"
         task_id = parts[2] if action_type == "opt_sub" else parts[1]
@@ -156,17 +156,30 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             await event.answer("Session expired or file was deleted.", alert=True)
             return
 
+        # If sub_type is auto, directly trigger auto optimization (no bitrate prompt)
+        if sub_type == "auto":
+            if task_ctx.is_processing:
+                await event.answer("Processing is already in progress. Please wait...", alert=True)
+                return
+            task_ctx.is_processing = True
+            task_ctx.output_path = None
+            try:
+                task_ctx.status_message = await event.get_message()
+            except Exception:
+                pass
+            await event.edit("**Queued for Auto Recommended (Smart Fix)...**\nWaiting for processing slot...", buttons=None)
+            term_log("PROCESS", f"User selected Optimization (AUTO) using original source: {task_ctx.input_path.name}", task_id=task_id)
+            await event.answer("Starting auto optimization...")
+            asyncio.create_task(process_optimization(task_ctx, "auto", client))
+            return
+
         if sub_type in ("720", "low"):
             mode = "720"
             title = "Convert to 720p"
             desc_target = "Caps resolution at 720p HD (never upscaled)"
-        elif sub_type in ("1080", "mod"):
+        else:
             mode = "1080"
             title = "Convert to 1080p"
-            desc_target = "Caps resolution at 1080p FHD (never upscaled)"
-        else:
-            mode = "auto"
-            title = "Auto Recommended"
             desc_target = "Caps resolution at 1080p FHD (never upscaled)"
 
         menu = build_bitrate_choice_menu(mode, task_id)
@@ -330,11 +343,11 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             await event.answer("Session expired or file was deleted.", alert=True)
             return
 
-        # If sub_mode is a bare mode without bitrate choice, prompt bitrate preference menu
-        if sub_mode in ("720", "low", "1080", "mod", "auto"):
-            norm_mode = "720" if sub_mode in ("720", "low") else ("1080" if sub_mode in ("1080", "mod") else "auto")
+        # If sub_mode is a bare mode without bitrate choice, prompt bitrate preference menu (720 and 1080 only)
+        if sub_mode in ("720", "low", "1080", "mod"):
+            norm_mode = "720" if sub_mode in ("720", "low") else "1080"
             menu = build_bitrate_choice_menu(norm_mode, task_id)
-            title = "Convert to 720p" if norm_mode == "720" else ("Convert to 1080p" if norm_mode == "1080" else "Auto Recommended")
+            title = "Convert to 720p" if norm_mode == "720" else "Convert to 1080p"
             desc_target = "720p HD" if norm_mode == "720" else "1080p FHD"
             text = (
                 f"**{title} — Bitrate Preference:**\n\n"
@@ -363,11 +376,11 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             "720_less": "Convert to 720p (Lesser Bitrate)",
             "1080_same": "Convert to 1080p (Keep Same Bitrate)",
             "1080_less": "Convert to 1080p (Lesser Bitrate)",
-            "auto_same": "Auto (Keep Same Bitrate)",
+            "auto": "Auto Recommended (Smart Fix)",
+            "auto_same": "Auto Recommended (Smart Fix)",
             "auto_less": "Auto (Lesser Bitrate)",
             "low": "Convert to 720p",
-            "mod": "Convert to 1080p",
-            "auto": "Auto Recommended"
+            "mod": "Convert to 1080p"
         }
         mode_label = mode_names.get(sub_mode, "Optimization")
         # Remove buttons immediately so user cannot click options while processing is running
@@ -753,7 +766,7 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
             elif mode == "auto_less":
                 cmd, explanation = VideoOptimizer.build_auto_recommended_args(meta, out_path, current_hardware, bitrate_mode="less")
             else:
-                cmd, explanation = VideoOptimizer.build_auto_recommended_args(meta, out_path, current_hardware, bitrate_mode="same")
+                cmd, explanation = VideoOptimizer.build_auto_recommended_args(meta, out_path, current_hardware, bitrate_mode="auto")
 
             active_engine_str = current_hardware.description if "-c:v" in cmd and "h264_vaapi" in cmd else (
                 "Pristine Stream (FastStart)" if "-c:v" in cmd and "copy" in cmd else f"CPU Multi-Thread ({current_hardware.cpu_cores} cores)"
@@ -792,8 +805,9 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
             # Transcode completed
             out_size = os.path.getsize(out_path) if out_path.exists() else 0
 
-            # Absolute Failsafe: An optimizer must NEVER deliver an output larger than the input!
-            if out_size >= meta.file_size_bytes:
+            # Failsafe for 720p / 1080p modes: strictly deliver smaller or equal size.
+            # In Auto Recommended mode, user requested maximum smoothness and HD quality, allowing larger size if needed.
+            if out_size >= meta.file_size_bytes and not mode.startswith("auto"):
                 term_log("PROCESS", f"Initial output ({format_bytes(out_size)}) >= input ({format_bytes(meta.file_size_bytes)}). Running second-pass safe bitrate compression.", task_id=task_id)
                 dur = max(meta.duration_seconds, 1.0)
                 ratio_target = 0.95 if bitrate_mode == "same" else 0.60
@@ -902,7 +916,7 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
             else:
                 inc_bytes = out_size - meta.file_size_bytes
                 inc_pct = (inc_bytes / meta.file_size_bytes * 100)
-                reduction_str = f"+{inc_pct:.1f}% ({format_bytes(inc_bytes)} added for standard compatibility)"
+                reduction_str = f"+{inc_pct:.1f}% ({format_bytes(inc_bytes)} enhanced for smooth HD quality)"
 
             # 1. Probe output media for Before & After comparison and rich video caption
             meta_after = await probe_media(out_path)

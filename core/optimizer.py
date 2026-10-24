@@ -446,49 +446,22 @@ class VideoOptimizer:
             # Compresses bitrate to deliver noticeably smaller file size while keeping good mobile quality
             target_br = max(300, min(3500, int(src_br * 0.55)))
             explanation.append(f"Compressed stream bitrate ({src_br} kbps -> {target_br} kbps) for reduced file size & lighter storage")
-            if target_br >= 3000:
-                vaapi_qp = 42
-            elif target_br >= 2000:
-                vaapi_qp = 44
-            elif target_br >= 1200:
-                vaapi_qp = 46
-            else:
-                vaapi_qp = 48
+            vaapi_qp = 42 if target_br >= 3000 else (44 if target_br >= 2000 else 46)
             target_crf = 25
         else:
-            # "same" / Best Quality Mode:
+            # Auto Smooth HD Mode: Focuses on maximum smoothness, HD visual clarity, and flawless phone playability
             max_mobile_ceiling = 20000  # 20 Mbps
             if src_br > max_mobile_ceiling:
                 target_br = max_mobile_ceiling
-                explanation.append(f"Reduced very high camera bitrate ({src_br // 1000} Mbps -> 20 Mbps master quality for ultra-detailed, smooth 1080p)")
+                explanation.append(f"Optimized bloated camera bitrate ({src_br // 1000} Mbps -> 20 Mbps master quality for ultra-detailed, smooth 1080p)")
             else:
-                target_br = max(200, int(src_br * 0.95))
-                explanation.append(f"Preserved high bitrate stream density ({src_br} kbps -> {target_br} kbps) for maximum 1080p detail")
+                target_br = min(max_mobile_ceiling, max(src_br, 12000))
+                explanation.append("Optimized with smooth HD quality for fluid smartphone playback")
 
-            # Map target bitrate to calibrated VAAPI CQP for 1080p:
-            if target_br >= 16000:
-                vaapi_qp = 24
-            elif target_br >= 11000:
-                vaapi_qp = 28
-            elif target_br >= 8000:
-                vaapi_qp = 32
-            elif target_br >= 6500:
-                vaapi_qp = 34
-            elif target_br >= 5500:
-                vaapi_qp = 36
-            elif target_br >= 4600:
-                vaapi_qp = 38
-            elif target_br >= 4000:
-                vaapi_qp = 40
-            elif target_br >= 3400:
-                vaapi_qp = 42
-            elif target_br >= 2800:
-                vaapi_qp = 44
-            elif target_br >= 2000:
-                vaapi_qp = 46
-            else:
-                vaapi_qp = 48
-            target_crf = 17 if target_br >= 16000 else (19 if target_br >= 5000 else 21)
+            # High visual quality CQP for Intel VAAPI:
+            # QP 26 (~14 Mbps) ensures flawless, fluid 1080p HD without compression artifacts or blockiness
+            vaapi_qp = 26
+            target_crf = 19
 
         if hw.hwaccel_type == "vaapi" and hw.hwaccel_device:
             cmd = ["-init_hw_device", f"vaapi=va:{hw.hwaccel_device}", "-filter_hw_device", "va", "-i", str(meta.file_path)]
