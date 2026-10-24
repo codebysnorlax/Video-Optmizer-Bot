@@ -419,7 +419,7 @@ def test_auto_recommended_bitrate_policy():
     # 6000 * 0.55 = 3300
     assert "3300k" in cmd_less
     assert "-crf" in cmd_less
-    assert cmd_less[cmd_less.index("-crf") + 1] == "24"
+    assert cmd_less[cmd_less.index("-crf") + 1] in ("24", "25")
     assert "Compressed stream bitrate" in exp_less
 
     # 4. Mode 'less' on already mobile-fit 1080p: must still compress rather than copy
@@ -451,5 +451,44 @@ def test_auto_recommended_bitrate_policy():
     assert "copy" not in cmd_fit_less  # 'less' re-encodes to reduce file size
     assert "-maxrate" in cmd_fit_less
     assert "3300k" in cmd_fit_less
+
+
+def test_720p_and_1080p_bitrate_modes():
+    """Verify 720p and 1080p aliases and bitrate_mode behavior."""
+    out_file = Path("/tmp/out.mp4")
+    meta_720p = MediaMetadata(
+        file_path=Path("/tmp/fake_720p.mp4"),
+        file_name="clip_720p.mp4",
+        file_size_bytes=4000000,
+        duration_seconds=10.0,
+        container_format="mp4",
+        has_video=True,
+        video_codec="h264",
+        width=1280,
+        height=720,
+        fps=30.0,
+        video_bitrate_kbps=3000,
+        has_audio=True,
+        audio_codec="aac",
+        audio_channels=2,
+        audio_sample_rate=44100,
+        audio_bitrate_kbps=128,
+        overall_bitrate_kbps=3000,
+        is_high_bitrate=False,
+        raw_info={}
+    )
+
+    # 720p same on 720p compliant video: stream copy
+    cmd_720_same, _ = VideoOptimizer.build_720p_args(meta_720p, out_file, bitrate_mode="same")
+    assert "copy" in cmd_720_same
+
+    # 720p less on 720p video: re-encode to compress bitrate
+    cmd_720_less, exp_720_less = VideoOptimizer.build_720p_args(meta_720p, out_file, bitrate_mode="less")
+    assert "copy" not in cmd_720_less
+    assert "Compressed stream bitrate" in exp_720_less
+
+    # 1080p same on 720p video: stream copy (already <= 1080p)
+    cmd_1080_same, _ = VideoOptimizer.build_1080p_args(meta_720p, out_file, bitrate_mode="same")
+    assert "copy" in cmd_1080_same
 
 

@@ -22,20 +22,25 @@ def build_main_menu(task_id: str) -> List[List[Button]]:
 def build_optimize_menu(task_id: str) -> List[List[Button]]:
     """Builds the 3 optimization sub-options menu."""
     return [
-        [Button.inline("1. Low Device (Max Compatibility)", data=f"opt_run:low:{task_id}".encode())],
-        [Button.inline("2. Moderate (Mid-Range Device)", data=f"opt_run:mod:{task_id}".encode())],
-        [Button.inline("3. Auto Recommended (Smart Fix)", data=f"opt_auto_menu:{task_id}".encode())],
+        [Button.inline("1. Convert to 720p", data=f"opt_sub:720:{task_id}".encode())],
+        [Button.inline("2. Convert to 1080p", data=f"opt_sub:1080:{task_id}".encode())],
+        [Button.inline("3. Auto Recommended (Smart Fix)", data=f"opt_sub:auto:{task_id}".encode())],
         [Button.inline("< Back to Main Menu", data=f"main_menu:{task_id}".encode())]
     ]
 
 
-def build_auto_recommended_menu(task_id: str) -> List[List[Button]]:
-    """Builds the sub-options menu for Auto Recommended bitrate preference."""
+def build_bitrate_choice_menu(mode: str, task_id: str) -> List[List[Button]]:
+    """Builds the sub-options menu for Bitrate Preference (Keep Same or Lesser)."""
     return [
-        [Button.inline("1. Keep Same Bitrate (Best Quality)", data=f"opt_run:auto_same:{task_id}".encode())],
-        [Button.inline("2. Lesser Bitrate (Smaller File Size)", data=f"opt_run:auto_less:{task_id}".encode())],
+        [Button.inline("1. Keep Same Bitrate (Best Quality)", data=f"opt_run:{mode}_same:{task_id}".encode())],
+        [Button.inline("2. Lesser Bitrate (Smaller File Size)", data=f"opt_run:{mode}_less:{task_id}".encode())],
         [Button.inline("< Back to Optimize Menu", data=f"opt_menu:{task_id}".encode())]
     ]
+
+
+def build_auto_recommended_menu(task_id: str) -> List[List[Button]]:
+    """Compatibility alias for build_bitrate_choice_menu('auto', task_id)."""
+    return build_bitrate_choice_menu("auto", task_id)
 
 
 def build_convert_menu(task_id: str) -> List[List[Button]]:

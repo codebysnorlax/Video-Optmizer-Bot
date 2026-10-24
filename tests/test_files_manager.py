@@ -43,12 +43,27 @@ def test_files_keyboards():
 def test_optimize_menu():
     menu = build_optimize_menu("task_abc")
     assert len(menu) == 4  # 3 options + back button
-    assert b"opt_run:low:task_abc" in menu[0][0].type.data
-    assert b"opt_run:mod:task_abc" in menu[1][0].type.data
-    assert b"opt_auto_menu:task_abc" in menu[2][0].type.data
+    assert b"opt_sub:720:task_abc" in menu[0][0].type.data
+    assert b"opt_sub:1080:task_abc" in menu[1][0].type.data
+    assert b"opt_sub:auto:task_abc" in menu[2][0].type.data
     assert b"main_menu:task_abc" in menu[3][0].type.data
 
-    from bot.keyboards import build_auto_recommended_menu
+    from bot.keyboards import build_bitrate_choice_menu, build_auto_recommended_menu
+    # 720p choice menu
+    menu_720 = build_bitrate_choice_menu("720", "task_abc")
+    assert len(menu_720) == 3
+    assert b"opt_run:720_same:task_abc" in menu_720[0][0].type.data
+    assert b"opt_run:720_less:task_abc" in menu_720[1][0].type.data
+    assert b"opt_menu:task_abc" in menu_720[2][0].type.data
+
+    # 1080p choice menu
+    menu_1080 = build_bitrate_choice_menu("1080", "task_abc")
+    assert len(menu_1080) == 3
+    assert b"opt_run:1080_same:task_abc" in menu_1080[0][0].type.data
+    assert b"opt_run:1080_less:task_abc" in menu_1080[1][0].type.data
+    assert b"opt_menu:task_abc" in menu_1080[2][0].type.data
+
+    # Auto recommended menu
     auto_menu = build_auto_recommended_menu("task_abc")
     assert len(auto_menu) == 3
     assert b"opt_run:auto_same:task_abc" in auto_menu[0][0].type.data

@@ -36,6 +36,7 @@ from database.models import (
 from bot.keyboards import (
     build_main_menu,
     build_optimize_menu,
+    build_bitrate_choice_menu,
     build_auto_recommended_menu,
     build_convert_menu,
     build_cleanup_original_menu,
@@ -139,28 +140,43 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         menu = build_optimize_menu(task_id)
         text = (
             "**Select Optimization Mode:**\n\n"
-            "**1. Low Device (Max Compatibility):** Downscales >720p to 720p (never upscales <=720p), caps >60fps at 60fps (never upsamples), moderates high bitrates for older & budget phones.\n"
-            "**2. Moderate (Mid-Range Device):** Downscales >1080p to 1080p (never upscales <=1080p), caps >60fps at 60fps, optimizes bitrate for smooth mid-range smartphone playback.\n"
-            "**3. Auto Recommended (Smart Fix):** Universal smartphone compatibility, downscales >1080p to 1080p (never upscales), fixes audio issues, strictly reduces file size."
+            "**1. Convert to 720p:** Downscales >720p to 720p (never upscales <=720p), caps >60fps at 60fps, smooth playback for older & budget phones.\n"
+            "**2. Convert to 1080p:** Downscales >1080p to 1080p (never upscales <=1080p), caps >60fps at 60fps, high clarity for mid-range smartphones.\n"
+            "**3. Auto Recommended (Smart Fix):** Universal smartphone compatibility, caps >1080p at 1080p, fixes audio issues, balanced size & smoothness."
         )
         await event.edit(text, buttons=menu)
         return
 
-    # 3b. Auto Recommended Bitrate Preference Menu
-    if action_type == "opt_auto_menu":
-        task_id = parts[1]
+    # 3b. Optimization Bitrate Preference Menu (All Modes)
+    if action_type in ("opt_sub", "opt_auto_menu"):
+        sub_type = parts[1] if action_type == "opt_sub" else "auto"
+        task_id = parts[2] if action_type == "opt_sub" else parts[1]
         task_ctx = await get_or_restore_task_ctx(task_id, event)
         if not task_ctx:
             await event.answer("Session expired or file was deleted.", alert=True)
             return
-        menu = build_auto_recommended_menu(task_id)
+
+        if sub_type in ("720", "low"):
+            mode = "720"
+            title = "Convert to 720p"
+            desc_target = "Caps resolution at 720p HD (never upscaled)"
+        elif sub_type in ("1080", "mod"):
+            mode = "1080"
+            title = "Convert to 1080p"
+            desc_target = "Caps resolution at 1080p FHD (never upscaled)"
+        else:
+            mode = "auto"
+            title = "Auto Recommended"
+            desc_target = "Caps resolution at 1080p FHD (never upscaled)"
+
+        menu = build_bitrate_choice_menu(mode, task_id)
         text = (
-            "**Auto Recommended — Bitrate Preference:**\n\n"
+            f"**{title} — Bitrate Preference:**\n\n"
             "Choose how you want to optimize your video for smartphone playback:\n\n"
-            "• **1. Keep Same Bitrate (Best Quality):**\n"
-            "Caps resolution at 1080p FHD (never upscaled) for universal mobile compatibility, while preserving original high bitrate stream density (up to 20 Mbps) for maximum clarity and detail.\n\n"
-            "• **2. Lesser Bitrate (Smaller File Size):**\n"
-            "Caps resolution at 1080p FHD and compresses the bitrate to deliver a significantly smaller file size while keeping high visual quality for mobile storage and data saving."
+            f"• **1. Keep Same Bitrate (Best Quality):**\n"
+            f"{desc_target} for universal mobile compatibility, while preserving source bitrate density for maximum clarity and detail.\n\n"
+            f"• **2. Lesser Bitrate (Smaller File Size):**\n"
+            f"{desc_target} and compresses the bitrate to deliver a significantly smaller file size while keeping crisp visual quality."
         )
         await event.edit(text, buttons=menu)
         return
@@ -314,16 +330,19 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             await event.answer("Session expired or file was deleted.", alert=True)
             return
 
-        # If sub_mode is 'auto', prompt user with the bitrate preference options
-        if sub_mode == "auto":
-            menu = build_auto_recommended_menu(task_id)
+        # If sub_mode is a bare mode without bitrate choice, prompt bitrate preference menu
+        if sub_mode in ("720", "low", "1080", "mod", "auto"):
+            norm_mode = "720" if sub_mode in ("720", "low") else ("1080" if sub_mode in ("1080", "mod") else "auto")
+            menu = build_bitrate_choice_menu(norm_mode, task_id)
+            title = "Convert to 720p" if norm_mode == "720" else ("Convert to 1080p" if norm_mode == "1080" else "Auto Recommended")
+            desc_target = "720p HD" if norm_mode == "720" else "1080p FHD"
             text = (
-                "**Auto Recommended — Bitrate Preference:**\n\n"
+                f"**{title} — Bitrate Preference:**\n\n"
                 "Choose how you want to optimize your video for smartphone playback:\n\n"
-                "• **1. Keep Same Bitrate (Best Quality):**\n"
-                "Caps resolution at 1080p FHD (never upscaled) for universal mobile compatibility, while preserving original high bitrate stream density (up to 20 Mbps) for maximum clarity and detail.\n\n"
-                "• **2. Lesser Bitrate (Smaller File Size):**\n"
-                "Caps resolution at 1080p FHD and compresses the bitrate to deliver a significantly smaller file size while keeping high visual quality for mobile storage and data saving."
+                f"• **1. Keep Same Bitrate (Best Quality):**\n"
+                f"Caps resolution at {desc_target} (never upscaled), while preserving source bitrate density for maximum clarity and detail.\n\n"
+                f"• **2. Lesser Bitrate (Smaller File Size):**\n"
+                f"Caps resolution at {desc_target} and compresses the bitrate to deliver a significantly smaller file size while keeping crisp visual quality."
             )
             await event.edit(text, buttons=menu)
             return
@@ -340,10 +359,15 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             pass
 
         mode_names = {
-            "low": "Low Device",
-            "mod": "Moderate",
+            "720_same": "Convert to 720p (Keep Same Bitrate)",
+            "720_less": "Convert to 720p (Lesser Bitrate)",
+            "1080_same": "Convert to 1080p (Keep Same Bitrate)",
+            "1080_less": "Convert to 1080p (Lesser Bitrate)",
             "auto_same": "Auto (Keep Same Bitrate)",
-            "auto_less": "Auto (Lesser Bitrate)"
+            "auto_less": "Auto (Lesser Bitrate)",
+            "low": "Convert to 720p",
+            "mod": "Convert to 1080p",
+            "auto": "Auto Recommended"
         }
         mode_label = mode_names.get(sub_mode, "Optimization")
         # Remove buttons immediately so user cannot click options while processing is running
@@ -686,11 +710,15 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
     status_msg = task_ctx.status_message
     
     mode_names = {
-        "low": "Low Device Optimize",
-        "mod": "Moderate Optimize",
-        "auto": "Auto Recommended",
+        "720_same": "Convert to 720p (Keep Same Bitrate)",
+        "720_less": "Convert to 720p (Lesser Bitrate)",
+        "1080_same": "Convert to 1080p (Keep Same Bitrate)",
+        "1080_less": "Convert to 1080p (Lesser Bitrate)",
         "auto_same": "Auto (Keep Same Bitrate)",
-        "auto_less": "Auto (Lesser Bitrate)"
+        "auto_less": "Auto (Lesser Bitrate)",
+        "low": "Convert to 720p",
+        "mod": "Convert to 1080p",
+        "auto": "Auto Recommended"
     }
     mode_label = mode_names.get(mode, "Optimization")
     
@@ -716,11 +744,12 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
     async with task_manager.semaphore:
         try:
             # Build optimization arguments
+            bitrate_mode = "less" if mode.endswith("_less") else "same"
             explanation = ""
-            if mode == "low":
-                cmd, explanation = VideoOptimizer.build_low_device_args(meta, out_path, current_hardware)
-            elif mode == "mod":
-                cmd, explanation = VideoOptimizer.build_moderate_args(meta, out_path, current_hardware)
+            if mode.startswith("720") or mode == "low":
+                cmd, explanation = VideoOptimizer.build_720p_args(meta, out_path, current_hardware, bitrate_mode=bitrate_mode)
+            elif mode.startswith("1080") or mode == "mod":
+                cmd, explanation = VideoOptimizer.build_1080p_args(meta, out_path, current_hardware, bitrate_mode=bitrate_mode)
             elif mode == "auto_less":
                 cmd, explanation = VideoOptimizer.build_auto_recommended_args(meta, out_path, current_hardware, bitrate_mode="less")
             else:
@@ -767,11 +796,12 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
             if out_size >= meta.file_size_bytes:
                 term_log("PROCESS", f"Initial output ({format_bytes(out_size)}) >= input ({format_bytes(meta.file_size_bytes)}). Running second-pass safe bitrate compression.", task_id=task_id)
                 dur = max(meta.duration_seconds, 1.0)
-                safe_kbps = max(200, int((meta.file_size_bytes * 8 * 0.65) / (dur * 1000)))
+                ratio_target = 0.95 if bitrate_mode == "same" else 0.60
+                safe_kbps = max(200, int((meta.file_size_bytes * 8 * ratio_target) / (dur * 1000)))
                 safe_maxrate = safe_kbps
                 safe_bufsize = safe_kbps * 2
 
-                cap_dim = 720 if mode == "low" else 1080
+                cap_dim = 720 if (mode.startswith("720") or mode == "low") else 1080
                 scale_part = VideoOptimizer.get_scale_filter(meta, cap_dim)
                 fps_part = VideoOptimizer.get_fps_filter(meta, 60.0)
                 filters = [f for f in [scale_part, fps_part, "format=yuv420p"] if f]
