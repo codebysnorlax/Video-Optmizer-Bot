@@ -16,13 +16,19 @@ class TaskContext:
     user_id: int
     input_path: Path
     output_path: Optional[Path]
-    meta: MediaMetadata
+    meta: Optional[MediaMetadata]
     status_message: any
     original_message_id: int
     t_received: float = 0.0
     download_time: float = 0.0
     probe_time: float = 0.0
     is_processing: bool = False
+    current_stage: str = "idle"  # "downloading", "encoding", "uploading", "idle"
+    is_cancelled: bool = False
+    is_confirming_stop: bool = False
+    active_async_task: Optional[asyncio.Task] = None
+    current_process: Optional[any] = None
+    active_stage_label: str = ""
 
 
 @dataclass

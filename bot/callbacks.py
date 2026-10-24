@@ -8,6 +8,7 @@ import uuid
 import asyncio
 import logging
 from pathlib import Path
+from typing import Optional, Dict, Any, List
 from telethon import events, Button
 from config.settings import settings
 from core.probe import (
@@ -45,7 +46,10 @@ from bot.keyboards import (
     build_files_list_menu,
     build_file_action_menu,
     build_recall_progress_menu,
-    build_confirm_stop_menu
+    build_confirm_stop_menu,
+    build_task_progress_menu,
+    build_confirm_stop_task_menu,
+    build_stopped_task_menu
 )
 from bot.progress import (
     ThrottledMessageUpdater,
@@ -250,10 +254,11 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
                 task_ctx.status_message = await event.get_message()
             except Exception:
                 pass
-            await event.edit("**Queued for Auto Recommended (Smart Fix)...**\nWaiting for processing slot...", buttons=None)
+            await event.edit("**Queued for Auto Recommended (Smart Fix)...**\nWaiting for processing slot...", buttons=build_task_progress_menu(task_id))
             term_log("PROCESS", f"User selected Optimization (AUTO) using original source: {task_ctx.input_path.name}", task_id=task_id)
             await event.answer("Starting auto optimization...")
-            asyncio.create_task(process_optimization(task_ctx, "auto", client))
+            opt_task = asyncio.create_task(process_optimization(task_ctx, "auto", client))
+            task_ctx.active_async_task = opt_task
             return
 
         if sub_type in ("720", "low"):
@@ -323,6 +328,19 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         # Advance to Step 2: Optimized/Processed file deletion
         disk = settings.get_disk_usage()
         out_path = cache.get("output_path")
+
+        if not out_path or not os.path.exists(out_path):
+            task_manager.remove_task(task_id)
+            final_text = (
+                "**Server Storage Cleanup Complete:**\n\n"
+                f"• **Original File:** `{orig_name}` -> {orig_status}\n\n"
+                f"**Current Server Free Space:** `{disk['free_gb']} GB / {disk['total_gb']} GB` ({disk['percent_used']}% used)\n\n"
+                "All set! Ready for your next video."
+            )
+            await event.edit(final_text, buttons=None)
+            await event.answer(alert_msg, alert=False)
+            return
+
         opt_name = Path(out_path).name if out_path else "processed_video"
         opt_size = os.path.getsize(out_path) if out_path and os.path.exists(out_path) else 0
         opt_size_str = format_bytes(opt_size)
@@ -466,12 +484,13 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             "mod": "Convert to 1080p"
         }
         mode_label = mode_names.get(sub_mode, "Optimization")
-        # Remove buttons immediately so user cannot click options while processing is running
-        await event.edit(f"**Queued for {mode_label}...**\nWaiting for processing slot...", buttons=None)
+        # Show queue status with Stop / Cancel button
+        await event.edit(f"**Queued for {mode_label}...**\nWaiting for processing slot...", buttons=build_task_progress_menu(task_id))
 
         term_log("PROCESS", f"User selected Optimization ({sub_mode.upper()}) using original source: {task_ctx.input_path.name}", task_id=task_id)
         await event.answer("Starting optimization...")
-        asyncio.create_task(process_optimization(task_ctx, sub_mode, client))
+        opt_task = asyncio.create_task(process_optimization(task_ctx, sub_mode, client))
+        task_ctx.active_async_task = opt_task
         return
 
     # 7. Execute Conversion Job
@@ -494,12 +513,13 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             pass
 
         label = "Smartphone Audio Fix (AAC)" if target_fmt == "audio_fix" else f"Conversion ({target_fmt.upper()})"
-        # Remove buttons immediately
-        await event.edit(f"**Queued for {label}...**\nWaiting for processing slot...", buttons=None)
+        # Show queue status with Stop / Cancel button
+        await event.edit(f"**Queued for {label}...**\nWaiting for processing slot...", buttons=build_task_progress_menu(task_id))
 
         term_log("PROCESS", f"User selected {label} using original source: {task_ctx.input_path.name}", task_id=task_id)
         await event.answer("Fixing audio for smartphones..." if target_fmt == "audio_fix" else f"Converting to {target_fmt.upper()}...")
-        asyncio.create_task(process_conversion(task_ctx, target_fmt, client))
+        conv_task = asyncio.create_task(process_conversion(task_ctx, target_fmt, client))
+        task_ctx.active_async_task = conv_task
         return
 
     # 8. Files List Navigation & Pagination
@@ -705,6 +725,156 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         await event.answer("Resuming upload...", alert=False)
         return
 
+    # 15. User Clicked Stop / Cancel on Active Task -> Show 2-Step Confirmation
+    if action_type == "stop_task":
+        task_id = parts[1]
+        task_ctx = task_manager.get_task(task_id)
+        if not task_ctx:
+            await event.answer("Task is no longer active or already completed.", alert=True)
+            return
+
+        task_ctx.is_confirming_stop = True
+        stage_name = task_ctx.active_stage_label or (task_ctx.current_stage.capitalize() if task_ctx.current_stage else "Processing")
+        confirm_text = (
+            "**Confirm Stop Active Process**\n\n"
+            f"Are you 100% sure you want to stop active **{stage_name}**?\n\n"
+            f"If stopped, the current {stage_name.lower()} operation will be terminated immediately."
+        )
+        await event.edit(confirm_text, buttons=build_confirm_stop_task_menu(task_id))
+        await event.answer()
+        return
+
+    # 16. Abort Stop Active Task (No, Continue Processing)
+    if action_type == "no_stop_task":
+        task_id = parts[1]
+        task_ctx = task_manager.get_task(task_id)
+        if not task_ctx:
+            await event.answer("Task has already completed or expired.", alert=True)
+            return
+
+        task_ctx.is_confirming_stop = False
+        stage_name = task_ctx.active_stage_label or (task_ctx.current_stage.capitalize() if task_ctx.current_stage else "Processing")
+        resume_text = (
+            f"**{stage_name} in Progress:**\n"
+            "**Status:** Resuming processing..."
+        )
+        await event.edit(resume_text, buttons=build_task_progress_menu(task_id))
+        await event.answer("Resuming process...", alert=False)
+        return
+
+    # 17. Confirmed 100% Sure Stop Active Task (Yes, 100% Sure - Stop Process)
+    if action_type == "yes_stop_task":
+        task_id = parts[1]
+        task_ctx = task_manager.get_task(task_id)
+        if not task_ctx:
+            await event.edit(
+                "**Process Already Ended**\n\nThe operation has already completed or ended.",
+                buttons=None
+            )
+            await event.answer()
+            return
+
+        task_ctx.is_cancelled = True
+        task_ctx.is_confirming_stop = False
+        stage_name = task_ctx.active_stage_label or (task_ctx.current_stage.capitalize() if task_ctx.current_stage else "Processing")
+        term_log("PROCESS", f"User confirmed STOP active {stage_name}", task_id=task_id)
+
+        # 1. Kill active FFmpeg subprocess if running
+        if task_ctx.current_process:
+            try:
+                task_ctx.current_process.kill()
+            except Exception as e:
+                logger.debug(f"Process kill error (already exited): {e}")
+
+        # 2. Cancel active asyncio task
+        if task_ctx.active_async_task and not task_ctx.active_async_task.done():
+            task_ctx.active_async_task.cancel()
+
+        # 3. Clean up partial output file if generated
+        if task_ctx.output_path and task_ctx.output_path.exists():
+            try:
+                task_ctx.output_path.unlink()
+            except Exception:
+                pass
+
+        # 4. Handle cancellation during downloading (incomplete file)
+        if task_ctx.current_stage == "downloading" or not task_ctx.input_path or not task_ctx.input_path.exists():
+            if task_ctx.input_path and task_ctx.input_path.exists():
+                try:
+                    task_ctx.input_path.unlink()
+                except Exception:
+                    pass
+            task_manager.remove_task(task_id)
+            stop_text = (
+                "**Download Stopped**\n\n"
+                "The video download was cancelled before completion.\n"
+                "No data was stored on the server.\n\n"
+                "Send any video whenever you are ready."
+            )
+            await event.edit(stop_text, buttons=None)
+            await event.answer("Download stopped.", alert=False)
+            return
+
+        # 5. Handled cancellation during encoding or uploading (pristine original file is intact)
+        meta = task_ctx.meta
+        if not meta and task_ctx.input_path.exists():
+            try:
+                meta = await probe_media(task_ctx.input_path)
+                task_ctx.meta = meta
+            except Exception:
+                pass
+
+        # Register in file cache so Retry and Delete buttons work
+        await register_file_cache(
+            task_id=task_id,
+            user_id=task_ctx.user_id,
+            input_path=str(task_ctx.input_path),
+            output_path=""
+        )
+
+        # Reset task state for re-use
+        task_ctx.is_processing = False
+        task_ctx.is_cancelled = False
+        task_ctx.current_stage = "idle"
+        task_ctx.active_stage_label = ""
+        task_ctx.current_process = None
+        task_ctx.active_async_task = None
+
+        if meta:
+            v_codec = (meta.video_codec or "unknown").upper()
+            a_codec = (meta.audio_codec or "none").upper() if meta.has_audio else "None"
+            fps_str = f"{meta.fps:.2f} fps" if meta.fps else "N/A"
+            res_str = f"{meta.width}x{meta.height} ({meta.resolution_label})"
+            dur_str = format_duration(meta.duration_seconds)
+            size_str = format_bytes(meta.file_size_bytes)
+            bitrate_str = f"{meta.overall_bitrate_kbps} kbps"
+
+            stop_text = (
+                f"**Process Stopped by User**\n\n"
+                f"Active **{stage_name}** was stopped.\n\n"
+                "**Original Source File Details:**\n"
+                f"• **File Name:** `{meta.file_name}`\n"
+                f"• **Resolution:** `{res_str}`\n"
+                f"• **Framerate:** `{fps_str}`\n"
+                f"• **Duration:** `{dur_str}`\n"
+                f"• **File Size:** `{size_str}`\n"
+                f"• **Video Codec:** `{v_codec}`\n"
+                f"• **Audio Codec:** `{a_codec}`\n"
+                f"• **Overall Bitrate:** `{bitrate_str}`\n\n"
+                "What would you like to do next?"
+            )
+        else:
+            stop_text = (
+                f"**Process Stopped by User**\n\n"
+                f"Active **{stage_name}** was stopped.\n"
+                f"• **File:** `{task_ctx.input_path.name}`\n\n"
+                "What would you like to do next?"
+            )
+
+        await event.edit(stop_text, buttons=build_stopped_task_menu(task_id))
+        await event.answer("Process stopped.", alert=False)
+        return
+
 
 async def do_recall_upload(recall_ctx: RecallContext, client) -> None:
     """Handles background upload of recalled file with live progress and cancellation."""
@@ -832,8 +1002,18 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
         action=f"optimize_{mode}"
     )
 
+    task_ctx.active_async_task = asyncio.current_task()
+    task_ctx.current_stage = "encoding"
+    task_ctx.active_stage_label = f"Optimizing ({mode_label})"
+    task_ctx.is_cancelled = False
+    task_ctx.is_confirming_stop = False
+
     updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
-    await updater.update(f"**Queued for {mode_label}...**\nWaiting for processing slot...", force=True)
+    await updater.update(
+        f"**Queued for {mode_label}...**\nWaiting for processing slot...",
+        buttons=build_task_progress_menu(task_id),
+        force=True
+    )
 
     start_exec = time.time()
 
@@ -858,6 +1038,16 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
             last_proc_log = 0.0
             async def transcode_progress(percent: float, speed: str, eta: int, fps: float):
                 nonlocal last_proc_log
+                if task_ctx.is_cancelled:
+                    if task_ctx.current_process:
+                        try:
+                            task_ctx.current_process.kill()
+                        except Exception:
+                            pass
+                    raise asyncio.CancelledError()
+                if task_ctx.is_confirming_stop:
+                    return
+
                 now = time.time()
                 eta_str = f"{eta}s" if eta is not None else "--"
                 if now - last_proc_log >= 0.15:
@@ -871,7 +1061,7 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                     f"**Speed:** `{speed}` | **FPS:** `{fps:.1f}` | **ETA:** `{eta_str}`\n"
                     f"**Engine:** `{active_engine_str}`"
                 )
-                await updater.update(text)
+                await updater.update(text, buttons=build_task_progress_menu(task_id))
 
             term_log("PROCESS", f"Starting FFmpeg transcode pipeline ({mode_label})", task_id=task_id)
             t_transcode_start = time.time()
@@ -880,8 +1070,10 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 cmd=cmd,
                 total_duration_seconds=meta.duration_seconds,
                 progress_callback=transcode_progress,
-                progress_interval=0.2
+                progress_interval=0.2,
+                on_process_started=lambda p: setattr(task_ctx, 'current_process', p)
             )
+            task_ctx.current_process = None
             transcode_time = round(time.time() - t_transcode_start, 1)
             term_log("PROCESS", f"Transcode finished ({mode_label}) in {transcode_time}s", task_id=task_id, live=False)
 
@@ -927,9 +1119,12 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                         cmd=cmd_safe,
                         total_duration_seconds=meta.duration_seconds,
                         progress_callback=transcode_progress,
-                        progress_interval=0.2
+                        progress_interval=0.2,
+                        on_process_started=lambda p: setattr(task_ctx, 'current_process', p)
                     )
+                    task_ctx.current_process = None
                 except Exception as e:
+                    task_ctx.current_process = None
                     logger.warning(f"Safe second pass transcode failed: {e}")
 
                 if fallback_out.exists() and os.path.getsize(fallback_out) < meta.file_size_bytes:
@@ -971,10 +1166,17 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
             )
 
             # Upload to Telegram with live progress
+            task_ctx.current_stage = "uploading"
+            task_ctx.active_stage_label = "Uploading Optimized Video"
             upload_start = time.time()
             last_up_log = 0.0
             async def upload_progress(current_bytes: int, total_bytes: int):
                 nonlocal last_up_log
+                if task_ctx.is_cancelled:
+                    raise asyncio.CancelledError()
+                if task_ctx.is_confirming_stop:
+                    return
+
                 now = time.time()
                 percent = (current_bytes / total_bytes * 100) if total_bytes > 0 else 0
                 if now - last_up_log >= 0.15:
@@ -987,7 +1189,7 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                     total_bytes=total_bytes,
                     start_time=upload_start
                 )
-                await updater.update(text)
+                await updater.update(text, buttons=build_task_progress_menu(task_id))
 
             # Calculate savings
             if out_size < meta.file_size_bytes:
@@ -1087,13 +1289,23 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 task_id=task_id
             )
 
-        except Exception as e:
+        except (asyncio.CancelledError, Exception) as e:
+            if task_ctx.is_cancelled or isinstance(e, asyncio.CancelledError):
+                term_log("PROCESS", f"Optimization stopped/cancelled by user for {meta.file_name}", task_id=task_id, live=False)
+                if out_path.exists():
+                    try:
+                        out_path.unlink()
+                    except Exception:
+                        pass
+                return
             logger.error(f"Optimization error for task {task_id}: {e}", exc_info=True)
             elapsed_time = round(time.time() - start_exec, 1)
             await record_task_failed(task_id, elapsed_time)
             await status_msg.edit(f"[ERROR] **Optimization Failed:**\n`{str(e)}`")
         finally:
             task_ctx.is_processing = False
+            task_ctx.current_process = None
+            task_ctx.active_async_task = None
 
 
 async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> None:
@@ -1123,8 +1335,18 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
         action=f"convert_{target_fmt}"
     )
 
+    task_ctx.active_async_task = asyncio.current_task()
+    task_ctx.current_stage = "encoding"
+    task_ctx.active_stage_label = f"Converting ({conv_label})"
+    task_ctx.is_cancelled = False
+    task_ctx.is_confirming_stop = False
+
     updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
-    await updater.update(f"**Queued for {conv_label}...**\nWaiting for processing slot...", force=True)
+    await updater.update(
+        f"**Queued for {conv_label}...**\nWaiting for processing slot...",
+        buttons=build_task_progress_menu(task_id),
+        force=True
+    )
 
     start_exec = time.time()
 
@@ -1136,6 +1358,16 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
             last_conv_log = 0.0
             async def transcode_progress(percent: float, speed: str, eta: int, fps: float):
                 nonlocal last_conv_log
+                if task_ctx.is_cancelled:
+                    if task_ctx.current_process:
+                        try:
+                            task_ctx.current_process.kill()
+                        except Exception:
+                            pass
+                    raise asyncio.CancelledError()
+                if task_ctx.is_confirming_stop:
+                    return
+
                 now = time.time()
                 eta_str = f"{eta}s" if eta is not None else "--"
                 if now - last_conv_log >= 0.15:
@@ -1149,7 +1381,7 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                     f"**Speed:** `{speed}` | **ETA:** `{eta_str}`\n"
                     f"**Engine:** `{current_hardware.description}`"
                 )
-                await updater.update(text)
+                await updater.update(text, buttons=build_task_progress_menu(task_id))
 
             # Run FFmpeg transcode
             t_transcode_start = time.time()
@@ -1157,8 +1389,10 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                 cmd=cmd,
                 total_duration_seconds=meta.duration_seconds,
                 progress_callback=transcode_progress,
-                progress_interval=0.2
+                progress_interval=0.2,
+                on_process_started=lambda p: setattr(task_ctx, 'current_process', p)
             )
+            task_ctx.current_process = None
             transcode_time = round(time.time() - t_transcode_start, 1)
             term_log("PROCESS", f"Transcode finished ({target_fmt.upper()}) in {transcode_time}s", task_id=task_id, live=False)
 
@@ -1173,10 +1407,17 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
             )
 
             # Upload with progress
+            task_ctx.current_stage = "uploading"
+            task_ctx.active_stage_label = f"Uploading {target_fmt.upper()}"
             upload_start = time.time()
             last_up_log = 0.0
             async def upload_progress(current_bytes: int, total_bytes: int):
                 nonlocal last_up_log
+                if task_ctx.is_cancelled:
+                    raise asyncio.CancelledError()
+                if task_ctx.is_confirming_stop:
+                    return
+
                 now = time.time()
                 percent = (current_bytes / total_bytes * 100) if total_bytes > 0 else 0
                 if now - last_up_log >= 0.15:
@@ -1189,7 +1430,7 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                     total_bytes=total_bytes,
                     start_time=upload_start
                 )
-                await updater.update(text)
+                await updater.update(text, buttons=build_task_progress_menu(task_id))
 
             # 1. Probe output media for Before & After comparison and rich caption
             meta_after = await probe_media(out_path)
@@ -1290,10 +1531,20 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                 task_id=task_id
             )
 
-        except Exception as e:
+        except (asyncio.CancelledError, Exception) as e:
+            if task_ctx.is_cancelled or isinstance(e, asyncio.CancelledError):
+                term_log("PROCESS", f"Conversion stopped/cancelled by user for {meta.file_name}", task_id=task_id, live=False)
+                if out_path.exists():
+                    try:
+                        out_path.unlink()
+                    except Exception:
+                        pass
+                return
             logger.error(f"Conversion error for task {task_id}: {e}", exc_info=True)
             elapsed_time = round(time.time() - start_exec, 1)
             await record_task_failed(task_id, elapsed_time)
             await status_msg.edit(f"[ERROR] **Conversion Failed:**\n`{str(e)}`")
         finally:
             task_ctx.is_processing = False
+            task_ctx.current_process = None
+            task_ctx.active_async_task = None

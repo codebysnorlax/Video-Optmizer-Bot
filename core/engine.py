@@ -28,7 +28,8 @@ async def run_ffmpeg_with_progress(
     cmd: List[str],
     total_duration_seconds: float,
     progress_callback: Optional[ProgressCallback] = None,
-    progress_interval: float = 0.2
+    progress_interval: float = 0.2,
+    on_process_started: Optional[Callable[[any], None]] = None
 ) -> None:
     """
     Executes FFmpeg with asynchronous line-by-line progress parsing.
@@ -49,6 +50,12 @@ async def run_ffmpeg_with_progress(
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.PIPE
     )
+
+    if on_process_started:
+        try:
+            on_process_started(proc)
+        except Exception:
+            pass
 
     current_fps = 0.0
     current_speed = "1.0x"

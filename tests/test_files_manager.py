@@ -191,3 +191,138 @@ async def test_start_dashboard():
     assert b"dash_hw" in buttons[1][0].type.data
     assert b"dash_help" in buttons[1][1].type.data
 
+
+def test_task_cancellation_keyboards():
+    from bot.keyboards import (
+        build_task_progress_menu,
+        build_confirm_stop_task_menu,
+        build_stopped_task_menu
+    )
+    # 1. Progress stop button
+    prog_menu = build_task_progress_menu("task_abc")
+    assert len(prog_menu) == 1
+    assert prog_menu[0][0].text == "Stop / Cancel"
+    assert prog_menu[0][0].type.data == b"stop_task:task_abc"
+
+    # 2. 2-Step Confirmation buttons
+    confirm_menu = build_confirm_stop_task_menu("task_abc")
+    assert len(confirm_menu) == 1
+    assert len(confirm_menu[0]) == 2
+    assert confirm_menu[0][0].text == "Yes, 100% Sure - Stop Process"
+    assert confirm_menu[0][0].type.data == b"yes_stop_task:task_abc"
+    assert confirm_menu[0][1].text == "No, Continue Processing"
+    assert confirm_menu[0][1].type.data == b"no_stop_task:task_abc"
+
+    # 3. Post-stop recovery menu
+    stopped_menu = build_stopped_task_menu("task_abc")
+    assert len(stopped_menu) == 3
+    assert stopped_menu[0][0].text == "1. Try Another Optimization / Method"
+    assert stopped_menu[0][0].type.data == b"retry_opt:task_abc"
+    assert stopped_menu[1][0].text == "2. Delete File from Server"
+    assert stopped_menu[1][0].type.data == b"del_orig:task_abc"
+    assert stopped_menu[2][0].text == "< Main Menu"
+    assert stopped_menu[2][0].type.data == b"main_menu:task_abc"
+
+
+@pytest.mark.asyncio
+async def test_task_stop_callbacks(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+    from bot.callbacks import handle_callback_query
+    from bot.task_manager import task_manager, TaskContext
+    from core.probe import MediaMetadata
+    from config.settings import settings
+
+    monkeypatch.setattr(settings, "DOWNLOAD_DIR", tmp_path)
+    monkeypatch.setattr(settings, "OUTPUT_DIR", tmp_path / "outputs")
+    settings.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    dummy_input = tmp_path / "task_stop_test.mp4"
+    dummy_input.write_bytes(b"dummy_video_bytes")
+    dummy_output = settings.OUTPUT_DIR / "task_stop_opt.mp4"
+    dummy_output.write_bytes(b"partial_output_bytes")
+
+    meta = MediaMetadata(
+        file_path=dummy_input,
+        file_name="task_stop_test.mp4",
+        file_size_bytes=1048576,
+        duration_seconds=30.0,
+        container_format="mp4",
+        has_video=True,
+        video_codec="h264",
+        width=1920,
+        height=1080,
+        fps=30.0,
+        video_bitrate_kbps=5000,
+        has_audio=True,
+        audio_codec="aac",
+        audio_channels=2,
+        audio_sample_rate=48000,
+        audio_bitrate_kbps=192,
+        overall_bitrate_kbps=5192,
+        is_high_bitrate=False,
+        raw_info={}
+    )
+
+    mock_proc = MagicMock()
+    mock_async_task = MagicMock()
+    mock_async_task.done.return_value = False
+
+    task_ctx = TaskContext(
+        task_id="task_stop_test",
+        user_id=12345,
+        input_path=dummy_input,
+        output_path=dummy_output,
+        meta=meta,
+        status_message=MagicMock(),
+        original_message_id=1,
+        t_received=100.0,
+        current_stage="encoding",
+        active_stage_label="Optimizing (Auto Recommended)",
+        current_process=mock_proc,
+        active_async_task=mock_async_task
+    )
+    task_manager.register_task(task_ctx)
+
+    # 1. User clicks stop_task
+    mock_event = MagicMock()
+    mock_event.data = b"stop_task:task_stop_test"
+    mock_event.edit = AsyncMock()
+    mock_event.answer = AsyncMock()
+
+    await handle_callback_query(mock_event, client=MagicMock())
+    assert task_ctx.is_confirming_stop is True
+    # Verify 100% sure prompt is displayed
+    edit_call_args = mock_event.edit.call_args[0][0]
+    assert "Confirm Stop Active Process" in edit_call_args
+    assert "100% sure" in edit_call_args
+
+    # 2. User clicks no_stop_task (continue)
+    mock_event.data = b"no_stop_task:task_stop_test"
+    await handle_callback_query(mock_event, client=MagicMock())
+    assert task_ctx.is_confirming_stop is False
+    edit_resume = mock_event.edit.call_args[0][0]
+    assert "Resuming processing" in edit_resume
+
+    # 3. User clicks yes_stop_task (confirmed 100% stop)
+    mock_event.data = b"yes_stop_task:task_stop_test"
+    await handle_callback_query(mock_event, client=MagicMock())
+    # Subprocess was killed
+    mock_proc.kill.assert_called_once()
+    # Async task was cancelled
+    mock_async_task.cancel.assert_called_once()
+    # Partial output was deleted
+    assert not dummy_output.exists()
+    # Original input is kept
+    assert dummy_input.exists()
+
+    # Message showed full original file details
+    edit_stop_text = mock_event.edit.call_args[0][0]
+    assert "Process Stopped by User" in edit_stop_text
+    assert "Original Source File Details:" in edit_stop_text
+    assert "task_stop_test.mp4" in edit_stop_text
+    assert "1920x1080" in edit_stop_text
+    assert "30.00 fps" in edit_stop_text
+    assert "H264" in edit_stop_text
+    assert "AAC" in edit_stop_text
+    assert "What would you like to do next?" in edit_stop_text
+

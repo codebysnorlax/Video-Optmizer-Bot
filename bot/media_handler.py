@@ -6,6 +6,7 @@ Handles video files, forwarded media, and large document attachments (up to 2GB)
 import time
 import uuid
 import logging
+import asyncio
 from pathlib import Path
 import shutil
 from typing import Optional
@@ -15,7 +16,7 @@ from core.probe import probe_media
 from core.hardware import current_hardware
 from core.terminal import term_log
 from database.models import upsert_user
-from bot.keyboards import build_main_menu
+from bot.keyboards import build_main_menu, build_task_progress_menu
 from bot.progress import ThrottledMessageUpdater, format_progress_status
 from bot.task_manager import task_manager, TaskContext
 
@@ -88,8 +89,28 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
     start_time = time.time()
     last_term_log = 0.0
 
+    task_ctx = TaskContext(
+        task_id=task_id,
+        user_id=user_id,
+        input_path=save_path,
+        output_path=None,
+        meta=None,
+        status_message=status_msg,
+        original_message_id=message.id,
+        t_received=start_time,
+        current_stage="downloading",
+        active_stage_label="Downloading Video"
+    )
+    task_manager.register_task(task_ctx)
+    task_ctx.active_async_task = asyncio.current_task()
+
     async def download_progress(current_bytes: int, total_bytes: int):
         nonlocal last_term_log
+        if task_ctx.is_cancelled:
+            raise asyncio.CancelledError()
+        if task_ctx.is_confirming_stop:
+            return  # do not overwrite confirmation prompt
+
         now = time.time()
         percent = (current_bytes / total_bytes * 100) if total_bytes > 0 else 0
         speed_mb = (current_bytes / max(0.1, now - start_time)) / (1024 * 1024)
@@ -104,7 +125,7 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
             total_bytes=total_bytes,
             start_time=start_time
         )
-        await updater.update(text)
+        await updater.update(text, buttons=build_task_progress_menu(task_id))
 
     try:
         # Check for identical cached file on server before downloading
@@ -137,25 +158,28 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
         summary_text = meta.get_summary_card(hardware_summary=current_hardware.description)
         main_menu = build_main_menu(task_id)
 
-        # Register task in memory
-        task_ctx = TaskContext(
-            task_id=task_id,
-            user_id=user_id,
-            input_path=save_path,
-            output_path=None,
-            meta=meta,
-            status_message=status_msg,
-            original_message_id=message.id,
-            t_received=start_time,
-            download_time=download_time,
-            probe_time=probe_time
-        )
-        task_manager.register_task(task_ctx)
+        # Update task context in memory
+        task_ctx.input_path = save_path
+        task_ctx.meta = meta
+        task_ctx.download_time = download_time
+        task_ctx.probe_time = probe_time
+        task_ctx.current_stage = "idle"
+        task_ctx.active_stage_label = ""
 
         # Prompt user with options
         await status_msg.edit(summary_text, buttons=main_menu)
 
-    except Exception as e:
+    except (asyncio.CancelledError, Exception) as e:
+        if task_ctx.is_cancelled or isinstance(e, asyncio.CancelledError):
+            term_log("DOWNLOAD", f"Download cancelled by user for {clean_name}", task_id=task_id, live=False)
+            if (existing_file is None) and save_path.exists():
+                try:
+                    save_path.unlink()
+                except Exception:
+                    pass
+            task_manager.remove_task(task_id)
+            return
+
         term_log("ERROR", f"Failed download or analysis: {str(e)}", task_id=task_id)
         logger.error(f"Error handling incoming video: {e}", exc_info=True)
         if (existing_file is None) and save_path.exists():
@@ -163,4 +187,8 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
                 save_path.unlink()
             except Exception:
                 pass
-        await status_msg.edit(f"[ERROR] **Failed to download or analyze video:**\n`{str(e)}`")
+        task_manager.remove_task(task_id)
+        try:
+            await status_msg.edit(f"[ERROR] **Failed to download or analyze video:**\n`{str(e)}`")
+        except Exception:
+            pass

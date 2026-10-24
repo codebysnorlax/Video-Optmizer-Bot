@@ -160,3 +160,37 @@ def build_confirm_stop_menu(recall_id: str) -> List[List[Button]]:
             Button.inline("No, Continue Sending", data=f"no_stop:{recall_id}".encode())
         ]
     ]
+
+
+def build_task_progress_menu(task_id: str) -> List[List[Button]]:
+    """Builds progress keyboard with Stop / Cancel button for active tasks."""
+    return [
+        [
+            Button.inline("Stop / Cancel", data=f"stop_task:{task_id}".encode())
+        ]
+    ]
+
+
+def build_confirm_stop_task_menu(task_id: str) -> List[List[Button]]:
+    """Builds 2-step confirmation keyboard to verify user wants to stop active task."""
+    return [
+        [
+            Button.inline("Yes, 100% Sure - Stop Process", data=f"yes_stop_task:{task_id}".encode()),
+            Button.inline("No, Continue Processing", data=f"no_stop_task:{task_id}".encode())
+        ]
+    ]
+
+
+def build_stopped_task_menu(task_id: str) -> List[List[Button]]:
+    """Builds recovery actions after active task cancellation."""
+    return [
+        [
+            Button.inline("1. Try Another Optimization / Method", data=f"retry_opt:{task_id}".encode())
+        ],
+        [
+            Button.inline("2. Delete File from Server", data=f"del_orig:{task_id}".encode())
+        ],
+        [
+            Button.inline("< Main Menu", data=f"main_menu:{task_id}".encode())
+        ]
+    ]
