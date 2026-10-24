@@ -176,15 +176,27 @@ def detect_hardware() -> HardwareProfile:
     cores = os.cpu_count() or 4
     cpu_model = get_cpu_model()
 
-    # Memory detection
+    # Native Memory detection via /proc/meminfo (works natively on Linux & Android Termux without psutil)
+    total_ram = 2048
+    avail_ram = 1024
     try:
-        import psutil
-        mem = psutil.virtual_memory()
-        total_ram = int(mem.total / (1024 * 1024))
-        avail_ram = int(mem.available / (1024 * 1024))
+        if os.path.exists("/proc/meminfo"):
+            with open("/proc/meminfo", "r") as f:
+                meminfo = {}
+                for line in f:
+                    if ":" in line:
+                        k, v = line.split(":", 1)
+                        parts = v.strip().split()
+                        if parts and parts[0].isdigit():
+                            meminfo[k.strip()] = int(parts[0])
+                if "MemTotal" in meminfo:
+                    total_ram = meminfo["MemTotal"] // 1024
+                if "MemAvailable" in meminfo:
+                    avail_ram = meminfo["MemAvailable"] // 1024
+                elif "MemFree" in meminfo:
+                    avail_ram = meminfo["MemFree"] // 1024
     except Exception:
-        total_ram = 2048
-        avail_ram = 1024
+        pass
 
     os_label = "Android (Termux)" if is_termux else f"{platform.system()} {platform.release()}"
 
