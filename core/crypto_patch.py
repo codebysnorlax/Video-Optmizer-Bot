@@ -51,6 +51,10 @@ def _find_system_crypto_library() -> Tuple[Optional[str], Optional[ctypes.CDLL]]
         "/data/data/com.termux/files/usr/lib/libcrypto.so",
         "/data/data/com.termux/files/usr/lib/libssl.so.3",
         "/data/data/com.termux/files/usr/lib/libssl.so",
+        "/system/lib64/libcrypto.so",
+        "/system/lib/libcrypto.so",
+        "/apex/com.android.conscrypt/lib64/libcrypto.so",
+        "/apex/com.android.conscrypt/lib/libcrypto.so",
     ])
 
     # 2. ctypes standard library discovery
