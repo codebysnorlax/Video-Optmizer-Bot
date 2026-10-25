@@ -403,3 +403,291 @@ async def test_recall_stop_callbacks(tmp_path):
     assert recall_ctx.is_cancelled is True
 
 
+@pytest.mark.asyncio
+async def test_format_queue_status():
+    from bot.progress import format_queue_status
+    text = format_queue_status(
+        position=2,
+        action_label="Auto Recommended",
+        file_name="holiday_clip.mp4",
+        active_jobs=1,
+        total_queued=3
+    )
+    assert "**Server is Busy — Task Queued**" in text
+    assert "• **Position in Queue:** `#2`" in text
+    assert "• **Active Processing Jobs:** `1`" in text
+    assert "• **Total Waiting in Queue:** `3`" in text
+    assert "• **Requested Action:** `Auto Recommended`" in text
+    assert "• **File Name:** `holiday_clip.mp4`" in text
+
+
+@pytest.mark.asyncio
+async def test_encoding_queue_concurrency_and_position_advancement():
+    import asyncio
+    from bot.task_manager import TaskManager, TaskContext
+    from unittest.mock import AsyncMock, MagicMock
+    from bot.progress import ThrottledMessageUpdater
+
+    tm = TaskManager(max_concurrent=1)
+
+    t1_status = MagicMock()
+    t1_status.edit = AsyncMock()
+    t1_updater = ThrottledMessageUpdater(t1_status, interval=0.01)
+    t1_ctx = TaskContext(
+        task_id="t1",
+        user_id=1,
+        input_path=Path("/tmp/t1.mp4"),
+        output_path=None,
+        meta=None,
+        status_message=t1_status,
+        original_message_id=101
+    )
+    tm.register_task(t1_ctx)
+
+    t2_status = MagicMock()
+    t2_status.edit = AsyncMock()
+    t2_updater = ThrottledMessageUpdater(t2_status, interval=0.01)
+    t2_ctx = TaskContext(
+        task_id="t2",
+        user_id=2,
+        input_path=Path("/tmp/t2.mp4"),
+        output_path=None,
+        meta=None,
+        status_message=t2_status,
+        original_message_id=102
+    )
+    tm.register_task(t2_ctx)
+
+    t3_status = MagicMock()
+    t3_status.edit = AsyncMock()
+    t3_updater = ThrottledMessageUpdater(t3_status, interval=0.01)
+    t3_ctx = TaskContext(
+        task_id="t3",
+        user_id=3,
+        input_path=Path("/tmp/t3.mp4"),
+        output_path=None,
+        meta=None,
+        status_message=t3_status,
+        original_message_id=103
+    )
+    tm.register_task(t3_ctx)
+
+    t1_acquired = asyncio.Event()
+    t1_release = asyncio.Event()
+    t2_acquired = asyncio.Event()
+    t2_release = asyncio.Event()
+    t3_acquired = asyncio.Event()
+    t3_release = asyncio.Event()
+
+    async def run_t1():
+        async with tm.acquire_encoding_slot("t1", updater=t1_updater, mode_label="Auto Recommended", file_name="t1.mp4"):
+            t1_acquired.set()
+            await t1_release.wait()
+
+    async def run_t2():
+        async with tm.acquire_encoding_slot("t2", updater=t2_updater, mode_label="720p HD", file_name="t2.mp4"):
+            t2_acquired.set()
+            await t2_release.wait()
+
+    async def run_t3():
+        async with tm.acquire_encoding_slot("t3", updater=t3_updater, mode_label="1080p FHD", file_name="t3.mp4"):
+            t3_acquired.set()
+            await t3_release.wait()
+
+    # Step 1: Task 1 acquires slot
+    task1 = asyncio.create_task(run_t1())
+    await t1_acquired.wait()
+    assert tm.get_queue_position("t1") == 0  # Active
+    assert tm.get_active_encoder_count() == 1
+    assert tm.get_queue_length() == 0
+
+    # Step 2: Task 2 attempts to acquire slot while Task 1 is transcoding
+    task2 = asyncio.create_task(run_t2())
+    await asyncio.sleep(0.05)
+    assert tm.get_queue_position("t2") == 1  # In queue at Position #1
+    assert tm.get_queue_length() == 1
+    assert t2_status.edit.called
+    last_t2_msg = t2_status.edit.call_args[0][0]
+    assert "Position in Queue:** `#1`" in last_t2_msg
+
+    # Step 3: Task 3 attempts to acquire slot while Task 1 is still transcoding
+    task3 = asyncio.create_task(run_t3())
+    await asyncio.sleep(0.05)
+    assert tm.get_queue_position("t3") == 2  # In queue at Position #2
+    assert tm.get_queue_length() == 2
+    assert t3_status.edit.called
+    last_t3_msg = t3_status.edit.call_args[0][0]
+    assert "Position in Queue:** `#2`" in last_t3_msg
+
+    # Step 4: Task 1 finishes transcoding and releases slot
+    t1_release.set()
+    await task1
+    await t2_acquired.wait()  # Task 2 immediately acquires the slot!
+    await asyncio.sleep(0.05)
+
+    assert tm.get_queue_position("t2") == 0  # Task 2 is now active
+    assert tm.get_queue_position("t3") == 1  # Task 3 advanced from #2 to #1!
+    assert tm.get_queue_length() == 1
+
+    # Task 3's message should have been automatically updated to Position #1
+    last_t3_msg = t3_status.edit.call_args[0][0]
+    assert "Position in Queue:** `#1`" in last_t3_msg
+
+    # Step 5: Task 2 finishes transcoding
+    t2_release.set()
+    await task2
+    await t3_acquired.wait()  # Task 3 acquires slot!
+    await asyncio.sleep(0.05)
+    assert tm.get_queue_position("t3") == 0
+    assert tm.get_queue_length() == 0
+
+    # Step 6: Task 3 finishes
+    t3_release.set()
+    await task3
+    assert tm.get_active_encoder_count() == 0
+    assert tm.get_queue_length() == 0
+
+
+@pytest.mark.asyncio
+async def test_encoding_queue_cancellation():
+    import asyncio
+    from bot.task_manager import TaskManager, TaskContext
+    from unittest.mock import MagicMock
+
+    tm = TaskManager(max_concurrent=1)
+
+    t1_ctx = TaskContext("t1", 1, Path("/tmp/t1.mp4"), None, None, MagicMock(), 101)
+    t2_ctx = TaskContext("t2", 2, Path("/tmp/t2.mp4"), None, None, MagicMock(), 102)
+    t3_ctx = TaskContext("t3", 3, Path("/tmp/t3.mp4"), None, None, MagicMock(), 103)
+    tm.register_task(t1_ctx)
+    tm.register_task(t2_ctx)
+    tm.register_task(t3_ctx)
+
+    t1_acquired = asyncio.Event()
+    t1_release = asyncio.Event()
+
+    async def run_t1():
+        async with tm.acquire_encoding_slot("t1"):
+            t1_acquired.set()
+            await t1_release.wait()
+
+    async def run_t2():
+        async with tm.acquire_encoding_slot("t2"):
+            pass
+
+    async def run_t3():
+        async with tm.acquire_encoding_slot("t3"):
+            pass
+
+    task1 = asyncio.create_task(run_t1())
+    await t1_acquired.wait()
+
+    task2 = asyncio.create_task(run_t2())
+    task3 = asyncio.create_task(run_t3())
+    await asyncio.sleep(0.05)
+
+    assert tm.get_queue_position("t2") == 1
+    assert tm.get_queue_position("t3") == 2
+
+    # User cancels Task 2 while waiting in queue
+    task2.cancel()
+    await asyncio.sleep(0.05)
+
+    assert tm.get_queue_position("t2") is None
+    assert tm.get_queue_position("t3") == 1  # Task 3 automatically promoted to #1
+
+    t1_release.set()
+    await task1
+    await task3
+    assert tm.get_queue_length() == 0
+    assert tm.get_active_encoder_count() == 0
+
+
+@pytest.mark.asyncio
+async def test_upload_runs_outside_encoding_slot(tmp_path, monkeypatch):
+    import asyncio
+    from bot.callbacks import process_optimization
+    from bot.task_manager import task_manager, TaskContext
+    from core.probe import MediaMetadata
+    from config.settings import settings
+    from unittest.mock import AsyncMock, MagicMock
+
+    monkeypatch.setattr(settings, "DOWNLOAD_DIR", tmp_path)
+    monkeypatch.setattr(settings, "OUTPUT_DIR", tmp_path / "outputs")
+    settings.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    import subprocess
+    from core.probe import probe_media
+    dummy_video = tmp_path / "test.mp4"
+    cmd = [
+        "ffmpeg", "-y",
+        "-f", "lavfi", "-i", "testsrc=duration=1:size=640x360:rate=24",
+        "-f", "lavfi", "-i", "sine=frequency=1000:duration=1",
+        "-c:v", "libx264", "-c:a", "aac",
+        str(dummy_video)
+    ]
+    subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, check=True)
+    meta = await probe_media(dummy_video)
+
+    upload_in_progress = asyncio.Event()
+    release_upload = asyncio.Event()
+
+    async def mock_send_file(*args, **kwargs):
+        upload_in_progress.set()
+        await release_upload.wait()
+        msg = MagicMock()
+        msg.id = 999
+        return msg
+
+    client = MagicMock()
+    client.send_file = mock_send_file
+    client.send_message = AsyncMock()
+
+    status1 = MagicMock()
+    status1.edit = AsyncMock()
+    status1.delete = AsyncMock()
+
+    ctx1 = TaskContext(
+        task_id="task_upload1",
+        user_id=101,
+        input_path=dummy_video,
+        output_path=None,
+        meta=meta,
+        status_message=status1,
+        original_message_id=1
+    )
+    task_manager.register_task(ctx1)
+
+    # Mock FFmpeg to create dummy output immediately
+    async def mock_run_ffmpeg(*args, **kwargs):
+        out_file = settings.OUTPUT_DIR / f"{ctx1.task_id}_opt_auto_test.mp4"
+        out_file.write_bytes(b"dummy_optimized")
+        if kwargs.get("on_process_started"):
+            kwargs["on_process_started"](None)
+
+    monkeypatch.setattr("bot.callbacks.run_ffmpeg_with_progress", mock_run_ffmpeg)
+    monkeypatch.setattr("bot.callbacks.probe_media", AsyncMock(return_value=meta))
+
+    t1 = asyncio.create_task(process_optimization(ctx1, "auto", client))
+
+    # Wait until Task 1 reaches upload stage
+    await upload_in_progress.wait()
+    assert ctx1.current_stage == "uploading"
+
+    # Verify that while Task 1 is uploading, the encoding slot is FREE!
+    assert task_manager.get_active_encoder_count() == 0
+
+    # Task 2 should be able to acquire encoding slot immediately!
+    slot2_acquired = False
+    async with task_manager.acquire_encoding_slot("task_upload2"):
+        slot2_acquired = True
+
+    assert slot2_acquired is True
+
+    # Now release upload and let Task 1 complete cleanly
+    release_upload.set()
+    await t1
+    task_manager.remove_task("task_upload1")
+
+
+

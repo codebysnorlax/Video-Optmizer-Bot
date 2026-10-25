@@ -138,3 +138,24 @@ def format_confirm_stop_recall_prompt(
     parts.append("If you confirm, the file transfer will be aborted immediately.")
     return "\n".join(parts)
 
+
+def format_queue_status(
+    position: int,
+    action_label: str,
+    file_name: str,
+    active_jobs: int = 1,
+    total_queued: int = 1
+) -> str:
+    """Formats queue waiting status message with position in queue."""
+    return (
+        "**Server is Busy — Task Queued**\n\n"
+        "The server is currently processing media for another task.\n"
+        "Your request is queued and will start automatically as soon as the active job completes.\n\n"
+        f"• **Position in Queue:** `#{position}`\n"
+        f"• **Active Processing Jobs:** `{active_jobs}`\n"
+        f"• **Total Waiting in Queue:** `{total_queued}`\n"
+        f"• **Requested Action:** `{action_label}`\n"
+        f"• **File Name:** `{file_name}`\n\n"
+        "Please wait, this message will update automatically as the queue advances."
+    )
+

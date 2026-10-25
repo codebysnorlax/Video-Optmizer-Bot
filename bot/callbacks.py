@@ -842,6 +842,12 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             details_lines.append(f"• **Codecs:** `{v_codec} / {a_codec}`")
             details_lines.append(f"• **Bitrate:** `{meta.overall_bitrate_kbps} kbps`")
 
+        q_pos = task_manager.get_queue_position(task_id)
+        if q_pos and q_pos > 0:
+            details_lines.append(f"• **Queue Status:** Waiting at Position #{q_pos} in queue")
+        elif q_pos == 0:
+            details_lines.append("• **Processing Status:** Actively transcoding on host")
+
         if task_ctx.output_path and task_ctx.output_path.exists():
             try:
                 out_size = os.path.getsize(task_ctx.output_path)
@@ -867,6 +873,20 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             return
 
         task_ctx.is_confirming_stop = False
+        q_pos = task_manager.get_queue_position(task_id)
+        if q_pos and q_pos > 0:
+            from bot.progress import format_queue_status
+            resume_text = format_queue_status(
+                position=q_pos,
+                action_label=task_ctx.active_stage_label or "Processing",
+                file_name=task_ctx.meta.file_name if task_ctx.meta else "video",
+                active_jobs=task_manager.get_active_encoder_count(),
+                total_queued=task_manager.get_queue_length()
+            )
+            await event.edit(resume_text, buttons=build_task_progress_menu(task_id))
+            await event.answer("Continuing in queue...", alert=False)
+            return
+
         stage_name = task_ctx.active_stage_label or (task_ctx.current_stage.capitalize() if task_ctx.current_stage else "Processing")
         resume_text = (
             f"**{stage_name} in Progress:**\n"
@@ -1156,22 +1176,17 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
     )
 
     task_ctx.active_async_task = asyncio.current_task()
-    task_ctx.current_stage = "encoding"
-    task_ctx.active_stage_label = f"Optimizing ({mode_label})"
+    task_ctx.current_stage = "queued"
+    task_ctx.active_stage_label = f"Queued for {mode_label}"
     task_ctx.is_cancelled = False
     task_ctx.is_confirming_stop = False
 
     updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
-    await updater.update(
-        f"**Queued for {mode_label}...**\nWaiting for processing slot...",
-        buttons=build_task_progress_menu(task_id),
-        force=True
-    )
 
     start_exec = time.time()
+    transcode_time = 0.0
 
-    async with task_manager.semaphore:
-        try:
+    try:
             # Build optimization arguments
             bitrate_mode = "less" if mode.endswith("_less") else "same"
             explanation = ""
@@ -1240,91 +1255,83 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 )
                 await updater.update(text, buttons=build_task_progress_menu(task_id))
 
-            term_log("PROCESS", f"Starting FFmpeg transcode pipeline ({mode_label})", task_id=task_id)
-            t_transcode_start = time.time()
-            # Run FFmpeg transcode with 0.2s interval for smooth terminal rendering
-            await run_ffmpeg_with_progress(
-                cmd=cmd,
-                total_duration_seconds=meta.duration_seconds,
-                progress_callback=transcode_progress,
-                progress_interval=0.2,
-                on_process_started=lambda p: setattr(task_ctx, 'current_process', p)
-            )
-            task_ctx.current_process = None
-            transcode_time = round(time.time() - t_transcode_start, 1)
-            term_log("PROCESS", f"Transcode finished ({mode_label}) in {transcode_time}s", task_id=task_id, live=False)
+            # Acquire exclusive media processing slot ONLY for CPU/GPU transcode
+            async with task_manager.acquire_encoding_slot(
+                task_id=task_id,
+                updater=updater,
+                mode_label=mode_label,
+                file_name=meta.file_name
+            ):
+                await updater.update(
+                    f"**Starting {mode_label}...**\nInitializing transcode engine...",
+                    buttons=build_task_progress_menu(task_id),
+                    force=True
+                )
+                term_log("PROCESS", f"Starting FFmpeg transcode pipeline ({mode_label})", task_id=task_id)
+                t_transcode_start = time.time()
+                # Run FFmpeg transcode with 0.2s interval for smooth terminal rendering
+                await run_ffmpeg_with_progress(
+                    cmd=cmd,
+                    total_duration_seconds=meta.duration_seconds,
+                    progress_callback=transcode_progress,
+                    progress_interval=0.2,
+                    on_process_started=lambda p: setattr(task_ctx, 'current_process', p)
+                )
+                task_ctx.current_process = None
+                transcode_time = round(time.time() - t_transcode_start, 1)
+                term_log("PROCESS", f"Transcode finished ({mode_label}) in {transcode_time}s", task_id=task_id, live=False)
 
-            # Transcode completed
-            out_size = os.path.getsize(out_path) if out_path.exists() else 0
+                # Transcode completed
+                out_size = os.path.getsize(out_path) if out_path.exists() else 0
 
-            # Failsafe for 720p / 1080p modes: strictly deliver smaller or equal size.
-            # In Auto Recommended mode, user requested maximum smoothness and HD quality, allowing larger size if needed.
-            if out_size >= meta.file_size_bytes and not mode.startswith("auto"):
-                term_log("PROCESS", f"Initial output ({format_bytes(out_size)}) >= input ({format_bytes(meta.file_size_bytes)}). Running second-pass safe bitrate compression.", task_id=task_id)
-                dur = max(meta.duration_seconds, 1.0)
-                ratio_target = 0.95 if bitrate_mode == "same" else 0.60
-                safe_kbps = max(200, int((meta.file_size_bytes * 8 * ratio_target) / (dur * 1000)))
-                safe_maxrate = safe_kbps
-                safe_bufsize = safe_kbps * 2
+                # Failsafe for 720p / 1080p modes: strictly deliver smaller or equal size.
+                # In Auto Recommended mode, user requested maximum smoothness and HD quality, allowing larger size if needed.
+                if out_size >= meta.file_size_bytes and not mode.startswith("auto"):
+                    term_log("PROCESS", f"Initial output ({format_bytes(out_size)}) >= input ({format_bytes(meta.file_size_bytes)}). Running second-pass safe bitrate compression.", task_id=task_id)
+                    dur = max(meta.duration_seconds, 1.0)
+                    ratio_target = 0.95 if bitrate_mode == "same" else 0.60
+                    safe_kbps = max(200, int((meta.file_size_bytes * 8 * ratio_target) / (dur * 1000)))
+                    safe_maxrate = safe_kbps
+                    safe_bufsize = safe_kbps * 2
 
-                cap_dim = 720 if (mode.startswith("720") or mode == "low") else 1080
-                scale_part = VideoOptimizer.get_scale_filter(meta, cap_dim)
-                fps_part = VideoOptimizer.get_fps_filter(meta, 60.0)
-                filters = [f for f in [scale_part, fps_part, "format=yuv420p"] if f]
-                vf_arg = ",".join(filters)
+                    cap_dim = 720 if (mode.startswith("720") or mode == "low") else 1080
+                    scale_part = VideoOptimizer.get_scale_filter(meta, cap_dim)
+                    fps_part = VideoOptimizer.get_fps_filter(meta, 60.0)
+                    filters = [f for f in [scale_part, fps_part, "format=yuv420p"] if f]
+                    vf_arg = ",".join(filters)
 
-                fallback_out = settings.OUTPUT_DIR / f"{task_id}_safe_{task_ctx.input_path.stem}.mp4"
-                cmd_safe = [
-                    "-i", str(task_ctx.input_path),
-                    "-c:v", "libx264",
-                    "-preset", "veryfast",
-                    "-b:v", f"{safe_kbps}k",
-                    "-maxrate", f"{safe_maxrate}k",
-                    "-bufsize", f"{safe_bufsize}k",
-                    "-threads", str(current_hardware.cpu_cores),
-                ]
-                if vf_arg:
-                    cmd_safe.extend(["-vf", vf_arg])
-                if meta.has_audio:
-                    cmd_safe.extend(["-c:a", "aac", "-b:a", "128k", "-ac", "2"])
-                else:
-                    cmd_safe.extend(["-an"])
-                cmd_safe.extend(["-movflags", "+faststart", str(fallback_out)])
-
-                try:
-                    await run_ffmpeg_with_progress(
-                        cmd=cmd_safe,
-                        total_duration_seconds=meta.duration_seconds,
-                        progress_callback=transcode_progress,
-                        progress_interval=0.2,
-                        on_process_started=lambda p: setattr(task_ctx, 'current_process', p)
-                    )
-                    task_ctx.current_process = None
-                except Exception as e:
-                    task_ctx.current_process = None
-                    logger.warning(f"Safe second pass transcode failed: {e}")
-
-                if fallback_out.exists() and os.path.getsize(fallback_out) < meta.file_size_bytes:
-                    try:
-                        out_path.unlink()
-                    except Exception:
-                        pass
-                    out_path = fallback_out
-                    task_ctx.output_path = out_path
-                    out_size = os.path.getsize(out_path)
-                    explanation += f"\n • Applied safe bitrate constraint ({safe_kbps} kbps) ensuring strictly reduced size."
-                else:
-                    # Last resort fallback: FastStart stream copy
-                    cmd_fallback = [
-                        "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                    fallback_out = settings.OUTPUT_DIR / f"{task_id}_safe_{task_ctx.input_path.stem}.mp4"
+                    cmd_safe = [
                         "-i", str(task_ctx.input_path),
-                        "-c", "copy",
-                        "-movflags", "+faststart",
-                        str(fallback_out)
+                        "-c:v", "libx264",
+                        "-preset", "veryfast",
+                        "-b:v", f"{safe_kbps}k",
+                        "-maxrate", f"{safe_maxrate}k",
+                        "-bufsize", f"{safe_bufsize}k",
+                        "-threads", str(current_hardware.cpu_cores),
                     ]
-                    proc = await asyncio.create_subprocess_exec(*cmd_fallback)
-                    await proc.wait()
-                    if fallback_out.exists():
+                    if vf_arg:
+                        cmd_safe.extend(["-vf", vf_arg])
+                    if meta.has_audio:
+                        cmd_safe.extend(["-c:a", "aac", "-b:a", "128k", "-ac", "2"])
+                    else:
+                        cmd_safe.extend(["-an"])
+                    cmd_safe.extend(["-movflags", "+faststart", str(fallback_out)])
+
+                    try:
+                        await run_ffmpeg_with_progress(
+                            cmd=cmd_safe,
+                            total_duration_seconds=meta.duration_seconds,
+                            progress_callback=transcode_progress,
+                            progress_interval=0.2,
+                            on_process_started=lambda p: setattr(task_ctx, 'current_process', p)
+                        )
+                        task_ctx.current_process = None
+                    except Exception as e:
+                        task_ctx.current_process = None
+                        logger.warning(f"Safe second pass transcode failed: {e}")
+
+                    if fallback_out.exists() and os.path.getsize(fallback_out) < meta.file_size_bytes:
                         try:
                             out_path.unlink()
                         except Exception:
@@ -1332,7 +1339,28 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                         out_path = fallback_out
                         task_ctx.output_path = out_path
                         out_size = os.path.getsize(out_path)
-                        explanation = " • Original video was already at maximum compression.\n • Preserved original pristine stream with FastStart enabled for instant streaming."
+                        explanation += f"\n • Applied safe bitrate constraint ({safe_kbps} kbps) ensuring strictly reduced size."
+                    else:
+                        # Last resort fallback: FastStart stream copy
+                        cmd_fallback = [
+                            "ffmpeg", "-y", "-hide_banner", "-loglevel", "error",
+                            "-i", str(task_ctx.input_path),
+                            "-c", "copy",
+                            "-movflags", "+faststart",
+                            str(fallback_out)
+                        ]
+                        proc = await asyncio.create_subprocess_exec(*cmd_fallback)
+                        await proc.wait()
+                        if fallback_out.exists():
+                            try:
+                                out_path.unlink()
+                            except Exception:
+                                pass
+                            out_path = fallback_out
+                            task_ctx.output_path = out_path
+                            out_size = os.path.getsize(out_path)
+                            explanation = " • Original video was already at maximum compression.\n • Preserved original pristine stream with FastStart enabled for instant streaming."
+
 
             # Register in file cache
             await register_file_cache(
@@ -1503,23 +1531,23 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 task_id=task_id
             )
 
-        except (asyncio.CancelledError, Exception) as e:
-            if task_ctx.is_cancelled or isinstance(e, asyncio.CancelledError):
-                term_log("PROCESS", f"Optimization stopped/cancelled by user for {meta.file_name}", task_id=task_id, live=False)
-                if out_path.exists():
-                    try:
-                        out_path.unlink()
-                    except Exception:
-                        pass
-                return
-            logger.error(f"Optimization error for task {task_id}: {e}", exc_info=True)
-            elapsed_time = round(time.time() - start_exec, 1)
-            await record_task_failed(task_id, elapsed_time)
-            await status_msg.edit(f"[ERROR] **Optimization Failed:**\n`{str(e)}`")
-        finally:
-            task_ctx.is_processing = False
-            task_ctx.current_process = None
-            task_ctx.active_async_task = None
+    except (asyncio.CancelledError, Exception) as e:
+        if task_ctx.is_cancelled or isinstance(e, asyncio.CancelledError):
+            term_log("PROCESS", f"Optimization stopped/cancelled by user for {meta.file_name}", task_id=task_id, live=False)
+            if out_path.exists():
+                try:
+                    out_path.unlink()
+                except Exception:
+                    pass
+            return
+        logger.error(f"Optimization error for task {task_id}: {e}", exc_info=True)
+        elapsed_time = round(time.time() - start_exec, 1)
+        await record_task_failed(task_id, elapsed_time)
+        await status_msg.edit(f"[ERROR] **Optimization Failed:**\n`{str(e)}`")
+    finally:
+        task_ctx.is_processing = False
+        task_ctx.current_process = None
+        task_ctx.active_async_task = None
 
 
 async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> None:
@@ -1550,22 +1578,17 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
     )
 
     task_ctx.active_async_task = asyncio.current_task()
-    task_ctx.current_stage = "encoding"
-    task_ctx.active_stage_label = f"Converting ({conv_label})"
+    task_ctx.current_stage = "queued"
+    task_ctx.active_stage_label = f"Queued for {conv_label}"
     task_ctx.is_cancelled = False
     task_ctx.is_confirming_stop = False
 
     updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
-    await updater.update(
-        f"**Queued for {conv_label}...**\nWaiting for processing slot...",
-        buttons=build_task_progress_menu(task_id),
-        force=True
-    )
 
     start_exec = time.time()
+    transcode_time = 0.0
 
-    async with task_manager.semaphore:
-        try:
+    try:
             cmd, is_audio = VideoConverter.build_convert_args(meta, target_fmt, out_path, current_hardware)
 
             term_log("PROCESS", f"Starting conversion pipeline ({target_fmt.upper()})", task_id=task_id)
@@ -1621,20 +1644,32 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                 )
                 await updater.update(text, buttons=build_task_progress_menu(task_id))
 
-            # Run FFmpeg transcode
-            t_transcode_start = time.time()
-            await run_ffmpeg_with_progress(
-                cmd=cmd,
-                total_duration_seconds=meta.duration_seconds,
-                progress_callback=transcode_progress,
-                progress_interval=0.2,
-                on_process_started=lambda p: setattr(task_ctx, 'current_process', p)
-            )
-            task_ctx.current_process = None
-            transcode_time = round(time.time() - t_transcode_start, 1)
-            term_log("PROCESS", f"Transcode finished ({target_fmt.upper()}) in {transcode_time}s", task_id=task_id, live=False)
+            # Acquire exclusive media processing slot ONLY for transcode
+            async with task_manager.acquire_encoding_slot(
+                task_id=task_id,
+                updater=updater,
+                mode_label=conv_label,
+                file_name=meta.file_name
+            ):
+                await updater.update(
+                    f"**Starting {conv_label}...**\nInitializing transcode engine...",
+                    buttons=build_task_progress_menu(task_id),
+                    force=True
+                )
+                # Run FFmpeg transcode
+                t_transcode_start = time.time()
+                await run_ffmpeg_with_progress(
+                    cmd=cmd,
+                    total_duration_seconds=meta.duration_seconds,
+                    progress_callback=transcode_progress,
+                    progress_interval=0.2,
+                    on_process_started=lambda p: setattr(task_ctx, 'current_process', p)
+                )
+                task_ctx.current_process = None
+                transcode_time = round(time.time() - t_transcode_start, 1)
+                term_log("PROCESS", f"Transcode finished ({target_fmt.upper()}) in {transcode_time}s", task_id=task_id, live=False)
 
-            out_size = os.path.getsize(out_path) if out_path.exists() else 0
+                out_size = os.path.getsize(out_path) if out_path.exists() else 0
 
             # Register in file cache
             await register_file_cache(
@@ -1807,20 +1842,20 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                 task_id=task_id
             )
 
-        except (asyncio.CancelledError, Exception) as e:
-            if task_ctx.is_cancelled or isinstance(e, asyncio.CancelledError):
-                term_log("PROCESS", f"Conversion stopped/cancelled by user for {meta.file_name}", task_id=task_id, live=False)
-                if out_path.exists():
-                    try:
-                        out_path.unlink()
-                    except Exception:
-                        pass
-                return
-            logger.error(f"Conversion error for task {task_id}: {e}", exc_info=True)
-            elapsed_time = round(time.time() - start_exec, 1)
-            await record_task_failed(task_id, elapsed_time)
-            await status_msg.edit(f"[ERROR] **Conversion Failed:**\n`{str(e)}`")
-        finally:
-            task_ctx.is_processing = False
-            task_ctx.current_process = None
-            task_ctx.active_async_task = None
+    except (asyncio.CancelledError, Exception) as e:
+        if task_ctx.is_cancelled or isinstance(e, asyncio.CancelledError):
+            term_log("PROCESS", f"Conversion stopped/cancelled by user for {meta.file_name}", task_id=task_id, live=False)
+            if out_path.exists():
+                try:
+                    out_path.unlink()
+                except Exception:
+                    pass
+            return
+        logger.error(f"Conversion error for task {task_id}: {e}", exc_info=True)
+        elapsed_time = round(time.time() - start_exec, 1)
+        await record_task_failed(task_id, elapsed_time)
+        await status_msg.edit(f"[ERROR] **Conversion Failed:**\n`{str(e)}`")
+    finally:
+        task_ctx.is_processing = False
+        task_ctx.current_process = None
+        task_ctx.active_async_task = None
