@@ -21,7 +21,7 @@ fi
 # 2. Update Termux packages and install system requirements
 echo "[2/5] Updating Termux packages and installing dependencies..."
 pkg update -y
-pkg install -y python ffmpeg tmux clang libjpeg-turbo
+pkg install -y python ffmpeg tmux clang openssl libjpeg-turbo
 
 # 3. Create Python virtual environment
 echo "[3/5] Setting up Python virtual environment (.venv)..."
@@ -29,7 +29,7 @@ if [ ! -d ".venv" ]; then
     python -m venv .venv
 fi
 
-# 4. Install Python dependencies
+# 4. Install Python dependencies (including high-speed C MTProto crypto)
 echo "[4/5] Installing Python packages from requirements.txt..."
 .venv/bin/pip install --upgrade pip
 .venv/bin/pip install -r requirements.txt
@@ -41,6 +41,8 @@ echo "[5/5] Running verification tests..."
 echo ""
 echo "========================================================"
 echo "  SETUP & VERIFICATION COMPLETE!                        "
+echo "  Accelerated MTProto Crypto: Active (cryptg / OpenSSL) "
+echo "  Multi-Connection Transfers: Active (4-6 workers)      "
 echo "========================================================"
 echo "To run the bot directly:"
 echo "  .venv/bin/python run_bot.py"

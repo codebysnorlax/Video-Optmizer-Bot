@@ -19,6 +19,7 @@ from database.models import upsert_user
 from bot.keyboards import build_main_menu, build_task_progress_menu, build_confirm_stop_task_menu
 from bot.progress import ThrottledMessageUpdater, format_progress_status, format_confirm_stop_prompt, make_progress_bar
 from bot.task_manager import task_manager, TaskContext
+from core.fast_transfer import fast_download
 
 logger = logging.getLogger(__name__)
 
@@ -154,10 +155,11 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
             save_path = existing_file
             download_time = 0.0
         else:
-            # Download media natively via Telethon MTProto chunked stream
-            await client.download_media(
-                message,
-                file=str(save_path),
+            # Download media via high-speed parallel MTProto stream
+            await fast_download(
+                client=client,
+                location_or_message=message,
+                out_path=save_path,
                 progress_callback=download_progress
             )
             download_time = round(time.time() - start_time, 1)

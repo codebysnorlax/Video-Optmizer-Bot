@@ -632,15 +632,13 @@ async def test_upload_runs_outside_encoding_slot(tmp_path, monkeypatch):
     upload_in_progress = asyncio.Event()
     release_upload = asyncio.Event()
 
-    async def mock_send_file(*args, **kwargs):
+    async def mock_fast_upload(*args, **kwargs):
         upload_in_progress.set()
         await release_upload.wait()
-        msg = MagicMock()
-        msg.id = 999
-        return msg
+        return MagicMock()
 
     client = MagicMock()
-    client.send_file = mock_send_file
+    client.send_file = AsyncMock()
     client.send_message = AsyncMock()
 
     status1 = MagicMock()
@@ -667,6 +665,7 @@ async def test_upload_runs_outside_encoding_slot(tmp_path, monkeypatch):
 
     monkeypatch.setattr("bot.callbacks.run_ffmpeg_with_progress", mock_run_ffmpeg)
     monkeypatch.setattr("bot.callbacks.probe_media", AsyncMock(return_value=meta))
+    monkeypatch.setattr("bot.callbacks.fast_upload", mock_fast_upload)
 
     t1 = asyncio.create_task(process_optimization(ctx1, "auto", client))
 

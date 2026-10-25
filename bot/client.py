@@ -44,6 +44,9 @@ async def register_bot_menu_commands(client: TelegramClient) -> None:
 
 def create_bot_client() -> TelegramClient:
     """Creates and configures the Telethon client in Bot mode."""
+    from core.crypto_patch import apply_crypto_patch
+    apply_crypto_patch()
+
     session_name = "optimizer_bot_session"
 
     client = TelegramClient(

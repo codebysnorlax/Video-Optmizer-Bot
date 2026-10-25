@@ -9,6 +9,7 @@ import logging
 import asyncio
 from config.settings import settings
 from core.hardware import current_hardware
+from core.crypto_patch import apply_crypto_patch, get_crypto_info
 from core.terminal import ColoredLogFormatter, InteractiveStreamHandler, print_banner_box, BOLD_GREEN, RESET
 from database.db import init_db
 from bot.client import create_bot_client
@@ -26,6 +27,7 @@ logger = logging.getLogger("OptimizerBot")
 def print_startup_banner() -> None:
     """Prints a clear, colorful system diagnostic box."""
     disk = settings.get_disk_usage()
+    crypto = get_crypto_info()
     items = [
         ("OS Platform", f"{current_hardware.os_name} ({current_hardware.arch})"),
         ("Mobile Termux", "YES (Android 10 SDM636)" if current_hardware.is_termux else "NO (Standard Linux)"),
@@ -33,6 +35,8 @@ def print_startup_banner() -> None:
         ("Memory Status", f"{current_hardware.available_ram_mb} MB free / {current_hardware.total_ram_mb} MB total"),
         ("Hardware Accel", current_hardware.description),
         ("Primary Encoder", current_hardware.video_encoder),
+        ("MTProto Crypto", f"{crypto['engine']} ({crypto['speed_estimate']})"),
+        ("Parallel Engine", "Multi-connection MTProto chunk streaming"),
         ("Host Disk Space", f"{disk['free_gb']} GB free / {disk['total_gb']} GB total"),
         ("Storage Temp Dir", str(settings.DOWNLOAD_DIR)),
         ("Database File", str(settings.DB_PATH))
@@ -41,7 +45,10 @@ def print_startup_banner() -> None:
 
 
 async def main() -> None:
-    # 1. Print colorful system diagnostic banner
+    # 1. Apply hardware / C crypto patches
+    apply_crypto_patch()
+
+    # 2. Print colorful system diagnostic banner
     print_startup_banner()
 
     # 2. Validate configuration

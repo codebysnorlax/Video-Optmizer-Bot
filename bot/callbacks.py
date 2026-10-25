@@ -9,7 +9,7 @@ import asyncio
 import logging
 from pathlib import Path
 from typing import Optional, Dict, Any, List
-from telethon import events, Button
+from telethon import events, Button, types
 from config.settings import settings
 from core.probe import (
     format_bytes,
@@ -22,6 +22,7 @@ from core.terminal import term_log
 from core.engine import run_ffmpeg_with_progress
 from core.optimizer import VideoOptimizer
 from core.converter import VideoConverter
+from core.fast_transfer import fast_upload
 from database.models import (
     record_task_start,
     record_task_complete,
@@ -1087,21 +1088,25 @@ async def do_recall_upload(recall_ctx: RecallContext, client) -> None:
     try:
         ext = file_path.suffix.lower()
         is_audio = ext in (".mp3", ".aac", ".wav", ".m4a", ".flac")
+        uploaded_file = await fast_upload(
+            client=client,
+            file_path=file_path,
+            filename=file_name,
+            progress_callback=recall_progress
+        )
         if is_audio:
             await client.send_file(
                 entity=user_id,
-                file=str(file_path),
+                file=uploaded_file,
                 caption=f"`{file_name}`",
-                voice_note=False,
-                progress_callback=recall_progress
+                voice_note=False
             )
         else:
             await client.send_file(
                 entity=user_id,
-                file=str(file_path),
+                file=uploaded_file,
                 caption=f"`{file_name}`",
-                supports_streaming=True,
-                progress_callback=recall_progress
+                supports_streaming=True
             )
 
         if not recall_ctx.is_cancelled:
@@ -1459,13 +1464,27 @@ async def process_optimization(task_ctx: TaskContext, mode: str, client) -> None
                 f"• **Format:** MP4 ({v_codec} / {a_codec})"
             )
 
-            # 2. Send media file with structured caption
+            # 2. Upload and send media file with structured caption
+            uploaded_file = await fast_upload(
+                client=client,
+                file_path=out_path,
+                filename=out_name,
+                progress_callback=upload_progress
+            )
+            video_attrs = [
+                types.DocumentAttributeVideo(
+                    duration=int(meta_after.duration_seconds),
+                    w=meta_after.width,
+                    h=meta_after.height,
+                    supports_streaming=True
+                )
+            ]
             sent_msg = await client.send_file(
                 entity=user_id,
-                file=str(out_path),
+                file=uploaded_file,
                 caption=video_caption,
-                supports_streaming=True,
-                progress_callback=upload_progress
+                attributes=video_attrs,
+                supports_streaming=True
             )
             upload_time = round(time.time() - upload_start, 1)
             term_log("UPLOAD", f"Upload finished in {upload_time}s", task_id=task_id, live=False)
@@ -1750,19 +1769,32 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
             fps_val = round(meta_after.fps) if meta_after.fps else 0
             fps_str = f" @ {fps_val}fps" if fps_val > 0 else ""
 
-            # 2. Send file or audio with structured caption
+            # 2. Upload and send file or audio with structured caption
+            uploaded_file = await fast_upload(
+                client=client,
+                file_path=out_path,
+                filename=out_name,
+                progress_callback=upload_progress
+            )
             if is_audio:
                 audio_caption = (
                     f"**File:** `{out_name}`\n"
                     f"• **Format:** {target_fmt.upper()} Audio ({a_codec})\n"
                     f"• **Size:** {format_bytes(out_size)}"
                 )
+                audio_attrs = [
+                    types.DocumentAttributeAudio(
+                        duration=int(meta_after.duration_seconds),
+                        title=out_name,
+                        performer=""
+                    )
+                ]
                 sent_msg = await client.send_file(
                     entity=user_id,
-                    file=str(out_path),
+                    file=uploaded_file,
                     caption=audio_caption,
-                    voice_note=False,
-                    progress_callback=upload_progress
+                    attributes=audio_attrs,
+                    voice_note=False
                 )
             else:
                 video_caption = (
@@ -1771,12 +1803,20 @@ async def process_conversion(task_ctx: TaskContext, target_fmt: str, client) -> 
                     f"• **Size:** {format_bytes(out_size)}\n"
                     f"• **Format:** {target_fmt.upper()} ({v_codec} / {a_codec})"
                 )
+                video_attrs = [
+                    types.DocumentAttributeVideo(
+                        duration=int(meta_after.duration_seconds),
+                        w=meta_after.width,
+                        h=meta_after.height,
+                        supports_streaming=True
+                    )
+                ]
                 sent_msg = await client.send_file(
                     entity=user_id,
-                    file=str(out_path),
+                    file=uploaded_file,
                     caption=video_caption,
-                    supports_streaming=True,
-                    progress_callback=upload_progress
+                    attributes=video_attrs,
+                    supports_streaming=True
                 )
             upload_time = round(time.time() - upload_start, 1)
             term_log("UPLOAD", f"Upload finished in {upload_time}s", task_id=task_id, live=False)
