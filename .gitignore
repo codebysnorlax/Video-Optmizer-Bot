@@ -8,7 +8,7 @@ __pycache__/
 env/
 venv/
 ENV/
-
+.agents/
 # Telethon & Session files
 *.session
 *.session-journal
