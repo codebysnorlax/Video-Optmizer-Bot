@@ -990,3 +990,222 @@ async def test_safe_tool_executor_json_stringified_arguments(tmp_path):
         assert cmd.count("-shortest") == 1
 
 
+@pytest.mark.asyncio
+async def test_safe_tool_executor_output_ffprobe_metadata(tmp_path):
+    """Verifies that run_execute_ffmpeg attaches comprehensive ffprobe metadata to deliverables and return dict."""
+    from core.ai.tools import SafeToolExecutor
+    from core.probe import MediaMetadata
+    from unittest.mock import patch, AsyncMock
+
+    in_f = tmp_path / "src.mp4"
+    in_f.write_bytes(b"src")
+    src_meta = MediaMetadata(
+        file_path=in_f,
+        file_name="src.mp4",
+        file_size_bytes=1000,
+        duration_seconds=10.0,
+        container_format="mov,mp4",
+        has_video=True,
+        video_codec="h264",
+        width=1920,
+        height=1080,
+        fps=30.0,
+        video_bitrate_kbps=2000,
+        has_audio=True,
+        audio_codec="aac",
+        audio_channels=2,
+        audio_sample_rate=48000,
+        audio_bitrate_kbps=128,
+        overall_bitrate_kbps=2128,
+        is_high_bitrate=False,
+        raw_info={}
+    )
+    executor = SafeToolExecutor(123, "t_probe", in_f, src_meta)
+
+    out_meta = MediaMetadata(
+        file_path=tmp_path / "out_bw.mp4",
+        file_name="out_bw.mp4",
+        file_size_bytes=800,
+        duration_seconds=10.0,
+        container_format="mov,mp4",
+        has_video=True,
+        video_codec="h264",
+        width=1920,
+        height=1080,
+        fps=30.0,
+        video_bitrate_kbps=1500,
+        has_audio=True,
+        audio_codec="aac",
+        audio_channels=2,
+        audio_sample_rate=48000,
+        audio_bitrate_kbps=128,
+        overall_bitrate_kbps=1628,
+        is_high_bitrate=False,
+        raw_info={}
+    )
+
+    async def mock_run_ffmpeg(cmd, **kwargs):
+        out_p = Path(cmd[-1])
+        out_p.write_bytes(b"out_data_800")
+
+    with patch("core.ai.tools.run_ffmpeg_with_progress", side_effect=mock_run_ffmpeg), \
+         patch("core.ai.tools.probe_media", AsyncMock(return_value=out_meta)):
+
+        res = await executor.run_execute_ffmpeg(
+            plan_title="Black and White Conversion",
+            output_filename="out_bw.mp4",
+            inputs=["v1"],
+            vf_filter="hue=s=0",
+            video_codec="libx264",
+            audio_codec="aac"
+        )
+
+        assert res["status"] == "success"
+        assert "ffprobe" in res
+        ffprobe = res["ffprobe"]
+        assert ffprobe["has_video"] is True
+        assert ffprobe["video_codec"] == "h264"
+        assert ffprobe["width"] == 1920
+        assert ffprobe["height"] == 1080
+        assert ffprobe["resolution"] == "1080p FHD (1920x1080)"
+        assert ffprobe["fps"] == 30.0
+        assert ffprobe["has_audio"] is True
+        assert ffprobe["audio_codec"] == "aac"
+        assert ffprobe["duration_seconds"] == 10.0
+        assert ffprobe["size_bytes"] == 12  # written 12 bytes
+        # Deliverables check
+        assert len(res["deliverables"]) == 1
+        d0 = res["deliverables"][0]
+        assert "ffprobe" in d0
+        assert d0["ffprobe"]["video_codec"] == "h264"
+
+
+def test_ai_agent_unrealistic_demand_and_black_white_guidelines(tmp_path):
+    """Verifies that VideoAIAgent system prompt explicitly contains guardrails for unrealistic requests and creative filters."""
+    from core.ai.agent import VideoAIAgent
+    from core.probe import MediaMetadata
+
+    in_f = tmp_path / "vid_1080p.mp4"
+    in_f.write_bytes(b"data")
+    meta_1080p = MediaMetadata(
+        file_path=in_f,
+        file_name="vid_1080p.mp4",
+        file_size_bytes=5000000,
+        duration_seconds=15.0,
+        container_format="mov,mp4",
+        has_video=True,
+        video_codec="h264",
+        width=1920,
+        height=1080,
+        fps=30.0,
+        video_bitrate_kbps=2500,
+        has_audio=True,
+        audio_codec="aac",
+        audio_channels=2,
+        audio_sample_rate=48000,
+        audio_bitrate_kbps=128,
+        overall_bitrate_kbps=2628,
+        is_high_bitrate=False,
+        raw_info={}
+    )
+
+    agent = VideoAIAgent(user_id=101, task_id="t_guard", input_path=in_f, meta=meta_1080p)
+    prompt = agent._build_system_prompt("can you make my original video in black and white or upscale to 4K?")
+
+    # Verify original video targeting rule
+    assert "inputs: ['v1']" in prompt
+    assert "[ORIGINAL USER SOURCE VIDEO]" in prompt
+
+    # Verify unrealistic demand guardrails
+    assert "Unrealistic & Impossible Demands" in prompt
+    assert "Upscaling a 1080p, 720p, 480p, or 360p video to 4K" in prompt
+    assert "unrealistic demand" in prompt
+
+    # Verify black and white recipe
+    assert "hue=s=0" in prompt
+    assert "create single image files" in prompt
+
+    # Verify output ffprobe awareness
+    assert "Output FFprobe Awareness" in prompt
+
+
+@pytest.mark.asyncio
+async def test_deliver_ai_results_conversational_chat_reply_and_finally_safety(tmp_path):
+    """Verifies that deliver_ai_results sends conversational chat reply and resets is_processing in finally block."""
+    from bot.ai_handler import deliver_ai_results
+    from bot.task_manager import TaskContext
+    from core.probe import MediaMetadata
+    from unittest.mock import AsyncMock, patch
+
+    in_f = tmp_path / "orig.mp4"
+    in_f.write_bytes(b"orig")
+    out_f = tmp_path / "out_bw.mp4"
+    out_f.write_bytes(b"out_bw_bytes")
+
+    out_meta = MediaMetadata(
+        file_path=out_f,
+        file_name="out_bw.mp4",
+        file_size_bytes=12,
+        duration_seconds=5.0,
+        container_format="mov,mp4",
+        has_video=True,
+        video_codec="h264",
+        width=1920,
+        height=1080,
+        fps=30.0,
+        video_bitrate_kbps=1000,
+        has_audio=True,
+        audio_codec="aac",
+        audio_channels=2,
+        audio_sample_rate=48000,
+        audio_bitrate_kbps=128,
+        overall_bitrate_kbps=1128,
+        is_high_bitrate=False,
+        raw_info={}
+    )
+
+    mock_client = AsyncMock()
+    mock_status_msg = AsyncMock()
+
+    task_ctx = TaskContext(
+        task_id="t_deliv",
+        user_id=999,
+        input_path=in_f,
+        output_path=None,
+        meta=out_meta,
+        status_message=mock_status_msg,
+        original_message_id=50
+    )
+    task_ctx.is_processing = True
+
+    with patch("bot.ai_handler.probe_media", AsyncMock(return_value=out_meta)), \
+         patch("bot.ai_handler.fast_upload", AsyncMock(return_value="doc_handle")), \
+         patch("bot.ai_handler.register_file_cache", AsyncMock()):
+
+        await deliver_ai_results(
+            task_ctx=task_ctx,
+            plan_title="Black and White",
+            out_paths=[out_f],
+            status_msg=mock_status_msg,
+            client=mock_client,
+            assistant_text="I converted your original video to black and white at 1080p FHD."
+        )
+
+        # Processing flag must be reset
+        assert task_ctx.is_processing is False
+        assert task_ctx.ai_session_active is True
+
+        # send_file must be called for the video
+        assert mock_client.send_file.called
+
+        # send_message must be called with the assistant text
+        assert mock_client.send_message.called
+        send_args = mock_client.send_message.call_args[0]
+        assert send_args[0] == 999
+        assert "I converted your original video to black and white at 1080p FHD." in send_args[1]
+
+        # status_msg.edit must be called with summary card
+        assert mock_status_msg.edit.called
+
+
+

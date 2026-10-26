@@ -535,13 +535,32 @@ class SafeToolExecutor:
                 }
 
             out_meta = await probe_media(out_path)
+            ffprobe_dict = {
+                "filename": safe_filename,
+                "has_video": out_meta.has_video if out_meta else False,
+                "resolution": out_meta.resolution_label if (out_meta and out_meta.has_video) else ("Audio Track" if (out_meta and out_meta.has_audio) else "Unknown"),
+                "width": out_meta.width if out_meta else None,
+                "height": out_meta.height if out_meta else None,
+                "video_codec": out_meta.video_codec if out_meta else None,
+                "video_bitrate_kbps": out_meta.video_bitrate_kbps if out_meta else None,
+                "fps": round(out_meta.fps, 2) if (out_meta and out_meta.fps) else None,
+                "has_audio": out_meta.has_audio if out_meta else False,
+                "audio_codec": out_meta.audio_codec if out_meta else None,
+                "audio_bitrate_kbps": out_meta.audio_bitrate_kbps if out_meta else None,
+                "overall_bitrate_kbps": out_meta.overall_bitrate_kbps if out_meta else None,
+                "duration_seconds": round(out_meta.duration_seconds, 2) if out_meta else 0.0,
+                "formatted_duration": format_duration(out_meta.duration_seconds) if out_meta else "Unknown",
+                "size_bytes": out_path.stat().st_size,
+                "formatted_size": format_bytes(out_path.stat().st_size)
+            }
             deliverables.append({
                 "filename": safe_filename,
                 "path": str(out_path),
                 "size_bytes": out_path.stat().st_size,
                 "formatted_size": format_bytes(out_path.stat().st_size),
-                "resolution": out_meta.resolution_label if (out_meta and out_meta.has_video) else "Audio Track",
-                "duration": format_duration(out_meta.duration_seconds) if out_meta else "Unknown"
+                "resolution": ffprobe_dict["resolution"],
+                "duration": ffprobe_dict["formatted_duration"],
+                "ffprobe": ffprobe_dict
             })
 
         if not deliverables:
@@ -559,7 +578,8 @@ class SafeToolExecutor:
             "output_size_bytes": first["size_bytes"],
             "formatted_size": first["formatted_size"],
             "resolution": first["resolution"],
-            "duration": first["duration"]
+            "duration": first["duration"],
+            "ffprobe": first.get("ffprobe", {})
         }
 
 

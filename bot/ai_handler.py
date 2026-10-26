@@ -270,7 +270,14 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
     task_ctx.is_processing = False
     reply_text = result.get("text") or result.get("assistant_text") or "I have processed your request."
     formatted_reply = f"**AI Video Engineer:**\n\n{reply_text}"
-    await status_msg.edit(formatted_reply, buttons=build_ai_session_menu(task_id))
+    try:
+        await status_msg.edit(formatted_reply, buttons=build_ai_session_menu(task_id))
+    except Exception as e:
+        logger.warning(f"Failed to edit status message with text reply: {e}")
+        try:
+            await event.reply(formatted_reply, buttons=build_ai_session_menu(task_id))
+        except Exception:
+            pass
 
 
 async def handle_ai_apply_fix(event, task_ctx, client) -> None:
@@ -396,162 +403,180 @@ async def deliver_ai_results(
     user_id = task_ctx.user_id
     meta = task_ctx.meta
 
-    valid_paths = [Path(p) for p in out_paths if Path(p).exists()]
-    total_deliverables = len(valid_paths)
+    try:
+        valid_paths = [Path(p) for p in out_paths if Path(p).exists()]
+        total_deliverables = len(valid_paths)
 
-    if total_deliverables == 0:
-        await status_msg.edit(
-            "**AI Notice:** No output deliverables were found to upload.",
-            buttons=build_ai_session_menu(task_id)
-        )
-        task_ctx.is_processing = False
-        return
-
-    # Live upload progress
-    task_ctx.current_stage = "uploading"
-    task_ctx.active_stage_label = f"Uploading AI Results ({total_deliverables} files)"
-    updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
-    total_output_size = 0
-    latest_video_path: Optional[Path] = None
-    latest_video_meta: Optional[MediaMetadata] = None
-
-    for idx, out_path in enumerate(valid_paths, start=1):
-        if task_ctx.is_cancelled:
-            task_ctx.is_processing = False
+        if total_deliverables == 0:
+            try:
+                await status_msg.edit(
+                    "**AI Notice:** No output deliverables were found to upload.",
+                    buttons=build_ai_session_menu(task_id)
+                )
+            except Exception:
+                pass
             return
 
-        # Register in file cache
-        await register_file_cache(
-            task_id=task_id,
-            user_id=user_id,
-            input_path=str(task_ctx.input_path),
-            output_path=str(out_path)
-        )
+        # Live upload progress
+        task_ctx.current_stage = "uploading"
+        task_ctx.active_stage_label = f"Uploading AI Results ({total_deliverables} files)"
+        updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
+        total_output_size = 0
+        latest_video_path: Optional[Path] = None
+        latest_video_meta: Optional[MediaMetadata] = None
 
-        upload_start = time.time()
-        disp_name = clean_display_name(out_path.name)
-        file_size_str = format_bytes(out_path.stat().st_size)
-
-        # Notify user immediately that transcoding is complete and upload is beginning
-        try:
-            await status_msg.edit(
-                f"**Transcoding Complete! Uploading Deliverables ({idx}/{total_deliverables})**\n\n"
-                f"• **Plan:** `{plan_title}`\n"
-                f"• **File:** `{disp_name}`\n"
-                f"• **Size:** `{file_size_str}`\n"
-                f"• **Status:** Uploading to Telegram...",
-                buttons=build_task_progress_menu(task_id)
-            )
-        except Exception:
-            pass
-
-        async def upload_progress(current_bytes: int, total_bytes: int):
+        for idx, out_path in enumerate(valid_paths, start=1):
             if task_ctx.is_cancelled:
-                raise asyncio.CancelledError()
-            percent = (current_bytes / total_bytes * 100) if total_bytes > 0 else 0
-            bar = make_progress_bar(percent)
-            cur_mb = current_bytes / (1024 * 1024)
-            tot_mb = total_bytes / (1024 * 1024)
-            elapsed = max(0.1, time.time() - upload_start)
-            speed_mb = (current_bytes / elapsed) / (1024 * 1024)
-            eta = int((total_bytes - current_bytes) / max(1, current_bytes / elapsed))
-            text = (
-                f"**Uploading Deliverables ({idx}/{total_deliverables})**\n\n"
-                f"• **Plan:** `{plan_title}`\n"
-                f"• **File:** `{disp_name}`\n"
-                f"• **Progress:** {bar}\n"
-                f"• **Uploaded:** `{cur_mb:.1f} MB / {tot_mb:.1f} MB`\n"
-                f"• **Speed:** `{speed_mb:.1f} MB/s` | **ETA:** `{eta}s`"
+                return
+
+            # Register in file cache
+            await register_file_cache(
+                task_id=task_id,
+                user_id=user_id,
+                input_path=str(task_ctx.input_path),
+                output_path=str(out_path)
             )
-            await updater.update(text, buttons=build_task_progress_menu(task_id))
 
-        try:
-            uploaded_doc = await fast_upload(
-                client=client,
-                file_path=out_path,
-                progress_callback=upload_progress
+            upload_start = time.time()
+            disp_name = clean_display_name(out_path.name)
+            file_size_str = format_bytes(out_path.stat().st_size)
+
+            # Notify user immediately that transcoding is complete and upload is beginning
+            try:
+                await status_msg.edit(
+                    f"**Transcoding Complete! Uploading Deliverables ({idx}/{total_deliverables})**\n\n"
+                    f"• **Plan:** `{plan_title}`\n"
+                    f"• **File:** `{disp_name}`\n"
+                    f"• **Size:** `{file_size_str}`\n"
+                    f"• **Status:** Uploading to Telegram...",
+                    buttons=build_task_progress_menu(task_id)
+                )
+            except Exception:
+                pass
+
+            async def upload_progress(current_bytes: int, total_bytes: int):
+                if task_ctx.is_cancelled:
+                    raise asyncio.CancelledError()
+                percent = (current_bytes / total_bytes * 100) if total_bytes > 0 else 0
+                bar = make_progress_bar(percent)
+                cur_mb = current_bytes / (1024 * 1024)
+                tot_mb = total_bytes / (1024 * 1024)
+                elapsed = max(0.1, time.time() - upload_start)
+                speed_mb = (current_bytes / elapsed) / (1024 * 1024)
+                eta = int((total_bytes - current_bytes) / max(1, current_bytes / elapsed))
+                text = (
+                    f"**Uploading Deliverables ({idx}/{total_deliverables})**\n\n"
+                    f"• **Plan:** `{plan_title}`\n"
+                    f"• **File:** `{disp_name}`\n"
+                    f"• **Progress:** {bar}\n"
+                    f"• **Uploaded:** `{cur_mb:.1f} MB / {tot_mb:.1f} MB`\n"
+                    f"• **Speed:** `{speed_mb:.1f} MB/s` | **ETA:** `{eta}s`"
+                )
+                await updater.update(text, buttons=build_task_progress_menu(task_id))
+
+            try:
+                uploaded_doc = await fast_upload(
+                    client=client,
+                    file_path=out_path,
+                    progress_callback=upload_progress
+                )
+            except Exception as e:
+                logger.error(f"AI output upload failed for {out_path.name}: {e}")
+                try:
+                    await status_msg.edit(
+                        f"**Upload Failed on {disp_name}:** `{str(e)}`",
+                        buttons=build_ai_session_menu(task_id)
+                    )
+                except Exception:
+                    pass
+                return
+
+            out_meta = await probe_media(out_path)
+            file_size = out_path.stat().st_size
+            total_output_size += file_size
+
+            # Register this deliverable into session assets so AI has full context of outputs
+            media_type = "video" if (out_meta and out_meta.has_video) else "audio"
+            task_ctx.add_asset(out_path, meta=out_meta, media_type=media_type)
+            if out_meta and out_meta.has_video:
+                latest_video_path = out_path
+                latest_video_meta = out_meta
+
+            if out_meta and out_meta.has_video:
+                before_after = format_before_after_analysis(meta, out_meta)
+                caption = (
+                    f"**AI Deliverable ({idx}/{total_deliverables})**\n"
+                    f"• **Plan Applied:** `{plan_title}`\n"
+                    f"• **Deliverable:** `{disp_name}`\n\n"
+                    f"{before_after}"
+                )
+                supports_streaming = True
+            else:
+                dur_str = format_duration(out_meta.duration_seconds) if out_meta else "Unknown"
+                caption = (
+                    f"**AI Deliverable ({idx}/{total_deliverables})**\n"
+                    f"• **Plan Applied:** `{plan_title}`\n"
+                    f"• **Deliverable:** `{disp_name}`\n"
+                    f"• **Type:** Extracted Audio Track\n"
+                    f"• **Size:** `{format_bytes(file_size)}` | **Duration:** `{dur_str}`"
+                )
+                supports_streaming = False
+
+            # Deliver file to user
+            await client.send_file(
+                entity=user_id,
+                file=uploaded_doc,
+                caption=caption,
+                supports_streaming=supports_streaming
             )
-        except Exception as e:
-            logger.error(f"AI output upload failed for {out_path.name}: {e}")
-            await status_msg.edit(
-                f"**Upload Failed on {disp_name}:** `{str(e)}`",
-                buttons=build_ai_session_menu(task_id)
-            )
-            task_ctx.is_processing = False
-            return
 
-        out_meta = await probe_media(out_path)
-        file_size = out_path.stat().st_size
-        total_output_size += file_size
-
-        # Register this deliverable into session assets so AI has full context of outputs
-        media_type = "video" if (out_meta and out_meta.has_video) else "audio"
-        task_ctx.add_asset(out_path, meta=out_meta, media_type=media_type)
-        if out_meta and out_meta.has_video:
-            latest_video_path = out_path
-            latest_video_meta = out_meta
-
-        if out_meta and out_meta.has_video:
-            before_after = format_before_after_analysis(meta, out_meta)
-            caption = (
-                f"**AI Deliverable ({idx}/{total_deliverables})**\n"
-                f"• **Plan Applied:** `{plan_title}`\n"
-                f"• **Deliverable:** `{disp_name}`\n\n"
-                f"{before_after}"
-            )
-            supports_streaming = True
-        else:
-            dur_str = format_duration(out_meta.duration_seconds) if out_meta else "Unknown"
-            caption = (
-                f"**AI Deliverable ({idx}/{total_deliverables})**\n"
-                f"• **Plan Applied:** `{plan_title}`\n"
-                f"• **Deliverable:** `{disp_name}`\n"
-                f"• **Type:** Extracted Audio Track\n"
-                f"• **Size:** `{format_bytes(file_size)}` | **Duration:** `{dur_str}`"
-            )
-            supports_streaming = False
-
-        # Deliver file to user
-        await client.send_file(
-            entity=user_id,
-            file=uploaded_doc,
-            caption=caption,
-            supports_streaming=supports_streaming
-        )
-
-    # Update primary session context to the latest produced video deliverable
-    if latest_video_path and latest_video_meta:
-        task_ctx.input_path = latest_video_path
-        task_ctx.meta = latest_video_meta
-
-    if task_ctx.ai_agent:
-        task_ctx.ai_agent.assets = task_ctx.get_assets()
-        task_ctx.ai_agent.tool_executor.assets = task_ctx.get_assets()
+        # Update primary session context to the latest produced video deliverable
         if latest_video_path and latest_video_meta:
-            task_ctx.ai_agent.input_path = latest_video_path
-            task_ctx.ai_agent.meta = latest_video_meta
-            task_ctx.ai_agent.tool_executor.input_path = latest_video_path
-            task_ctx.ai_agent.tool_executor.meta = latest_video_meta
+            task_ctx.input_path = latest_video_path
+            task_ctx.meta = latest_video_meta
 
-    # Record complete in DB
-    elapsed_time = getattr(task_ctx, "processing_elapsed_time", 1.0)
-    await record_task_complete(task_id, output_size=total_output_size, elapsed_time=elapsed_time)
+        if task_ctx.ai_agent:
+            task_ctx.ai_agent.assets = task_ctx.get_assets()
+            task_ctx.ai_agent.tool_executor.assets = task_ctx.get_assets()
+            if latest_video_path and latest_video_meta:
+                task_ctx.ai_agent.input_path = latest_video_path
+                task_ctx.ai_agent.meta = latest_video_meta
+                task_ctx.ai_agent.tool_executor.input_path = latest_video_path
+                task_ctx.ai_agent.tool_executor.meta = latest_video_meta
 
-    # Keep AI session active and display clean summary card
-    file_plural = "Deliverable" if total_deliverables == 1 else "Deliverables"
-    target_name = clean_display_name(task_ctx.meta.file_name)
-    note_line = f"\n• **AI Video Engineer:**\n{assistant_text}\n" if (assistant_text and len(assistant_text.strip()) > 0) else ""
-    summary_card = (
-        f"**{file_plural} Delivered Successfully ({total_deliverables} files)**\n\n"
-        f"• **Plan Applied:** `{plan_title}`\n"
-        f"• **Session Target:** `{target_name}`\n"
-        f"• **Sandbox Storage:** Preserved for chained edits.\n"
-        f"{note_line}\n"
-        "AI Video Engineer is still active. You can type another instruction, request further changes, or send new media assets."
-    )
-    await status_msg.edit(summary_card, buttons=build_ai_deliver_menu(task_id))
-    task_ctx.is_processing = False
-    task_ctx.ai_session_active = True
+        # Record complete in DB
+        elapsed_time = getattr(task_ctx, "processing_elapsed_time", 1.0)
+        await record_task_complete(task_id, output_size=total_output_size, elapsed_time=elapsed_time)
+
+        # Send AI conversational message directly in chat below delivered files
+        reply_sent = False
+        reply_msg = f"**AI Video Engineer:**\n\n{assistant_text}" if (assistant_text and len(assistant_text.strip()) > 0) else f"**AI Video Engineer:**\n\nI have completed `{plan_title}`. What would you like to do next with this file?"
+        try:
+            await client.send_message(user_id, reply_msg, buttons=build_ai_deliver_menu(task_id))
+            reply_sent = True
+        except Exception as send_err:
+            logger.warning(f"Failed to send conversational completion message: {send_err}")
+
+        # Keep AI session active and display clean summary card on status_msg
+        file_plural = "Deliverable" if total_deliverables == 1 else "Deliverables"
+        target_name = clean_display_name(task_ctx.meta.file_name)
+        note_line = f"\n• **AI Video Engineer:**\n{assistant_text}\n" if (assistant_text and len(assistant_text.strip()) > 0) else ""
+        summary_card = (
+            f"**{file_plural} Delivered Successfully ({total_deliverables} files)**\n\n"
+            f"• **Plan Applied:** `{plan_title}`\n"
+            f"• **Session Target:** `{target_name}`\n"
+            f"• **Sandbox Storage:** Preserved for chained edits.\n"
+            f"{note_line}\n"
+            "AI Video Engineer is still active. You can type another instruction, request further changes, or send new media assets."
+        )
+        status_buttons = None if reply_sent else build_ai_deliver_menu(task_id)
+        try:
+            await status_msg.edit(summary_card, buttons=status_buttons)
+        except Exception as edit_err:
+            logger.debug(f"Status card edit notice: {edit_err}")
+    finally:
+        task_ctx.is_processing = False
+        task_ctx.ai_session_active = True
 
 
 async def deliver_ai_output(task_ctx, plan_title: str, out_path: Path, status_msg, client) -> None:

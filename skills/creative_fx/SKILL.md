@@ -1,11 +1,11 @@
 ---
 name: creative_fx
-description: Use this skill for creative video modifications — reverse video, change aspect ratio (9:16 vertical, 16:9 widescreen, 1:1 square, 4:5 portrait), crop, pad, blur borders, and change playback speed. Triggers on 'reverse', 'play backwards', 'aspect ratio', 'change ratio', '9:16', '16:9', 'crop', 'vertical video', 'tiktok ratio', 'reels ratio', 'pad', 'slow motion', 'speed up'.
+description: Use this skill for creative video modifications — reverse video, change aspect ratio (9:16 vertical, 16:9 widescreen, 1:1 square, 4:5 portrait), crop, pad, blur borders, change playback speed, black and white / grayscale, sepia, color filters, and flip/rotate. Triggers on 'reverse', 'play backwards', 'aspect ratio', 'change ratio', '9:16', '16:9', 'crop', 'vertical video', 'tiktok ratio', 'reels ratio', 'pad', 'slow motion', 'speed up', 'black and white', 'b&w', 'grayscale', 'greyscale', 'monochrome', 'sepia', 'vintage', 'saturation', 'brightness', 'contrast', 'mirror', 'flip', 'rotate'.
 ---
 
 # Creative Effects & Transformations Skill
 
-Provides validated FFmpeg recipes and mobile host memory guardrails for aspect ratio conversions, video reversing, and creative effects.
+Provides validated FFmpeg recipes and mobile host memory guardrails for aspect ratio conversions, video reversing, color grading, and creative effects.
 
 ---
 
@@ -83,3 +83,69 @@ ffmpeg -i "$INPUT" -filter_complex "[0:v]setpts=0.5*PTS[v];[0:a]atempo=2.0[a]" -
 ```bash
 ffmpeg -i "$INPUT" -filter_complex "[0:v]setpts=2.0*PTS[v];[0:a]atempo=0.5[a]" -map "[v]" -map "[a]" -c:v libx264 -crf 22 -preset veryfast -movflags +faststart "$OUTPUT"
 ```
+
+---
+
+## 4. Color, Grayscale & Aesthetic Filters
+
+### A. Black and White / Grayscale (Desaturate)
+Converts video to clean monochromatic black and white while preserving crisp audio:
+```bash
+ffmpeg -i "$INPUT" -vf "hue=s=0" -c:v libx264 -crf 22 -preset fast -c:a copy -movflags +faststart "$OUTPUT"
+```
+
+### B. Sepia / Vintage Film Tone
+Applies a warm vintage cinematic tone:
+```bash
+ffmpeg -i "$INPUT" -vf "colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131" -c:v libx264 -crf 22 -preset fast -c:a copy -movflags +faststart "$OUTPUT"
+```
+
+### C. Vibrant / Boost Saturation (+50%)
+```bash
+ffmpeg -i "$INPUT" -vf "hue=s=1.5" -c:v libx264 -crf 22 -preset fast -c:a copy -movflags +faststart "$OUTPUT"
+```
+
+### D. Enhance Brightness & Contrast
+```bash
+ffmpeg -i "$INPUT" -vf "eq=brightness=0.06:contrast=1.15" -c:v libx264 -crf 22 -preset fast -c:a copy -movflags +faststart "$OUTPUT"
+```
+
+---
+
+## 5. Orientation, Flip & Mirroring
+
+### A. Horizontal Flip (Mirror Camera Selfie)
+```bash
+ffmpeg -i "$INPUT" -vf "hflip" -c:v libx264 -crf 22 -preset fast -c:a copy -movflags +faststart "$OUTPUT"
+```
+
+### B. Vertical Flip (Invert Upside-Down)
+```bash
+ffmpeg -i "$INPUT" -vf "vflip" -c:v libx264 -crf 22 -preset fast -c:a copy -movflags +faststart "$OUTPUT"
+```
+
+### C. Rotate 90 Degrees Clockwise
+```bash
+ffmpeg -i "$INPUT" -vf "transpose=1" -c:v libx264 -crf 22 -preset fast -c:a copy -movflags +faststart "$OUTPUT"
+```
+
+### D. Rotate 90 Degrees Counter-Clockwise
+```bash
+ffmpeg -i "$INPUT" -vf "transpose=2" -c:v libx264 -crf 22 -preset fast -c:a copy -movflags +faststart "$OUTPUT"
+```
+
+---
+
+## 6. Impossible & Unrealistic Requests (Strict Guardrails)
+
+### A. 4K / UHD Upscaling Refusal
+- **Never Fake Upscale:** FFmpeg cannot synthesize optical detail that was never recorded by the physical camera sensor. Upscaling 1080p, 720p, or SD video to 4K (`scale=3840:2160`) simply inflates file size to hundreds of megabytes with zero gain in sharpness, and crashes mobile hardware decoders.
+- **Action:** Reject the request in plain English. State that upscaling 1080p to 4K is an unrealistic demand that will not improve visual detail, and offer to optimize or apply filters at native resolution.
+
+### B. Audio Recovery from Silent Video
+- If a source video has no audio track (`has_audio: False` or `audio_codec: None`), explain that no audio stream exists to extract or recover unless the user uploads a new audio file.
+
+### C. Generative Inpainting & Subject Removal
+- Reject requests asking to remove background objects, change actors, or alter camera angles, as FFmpeg is a media processing tool rather than a generative diffusion model.
+
+

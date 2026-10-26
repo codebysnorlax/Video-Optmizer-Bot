@@ -18,11 +18,14 @@ from core.ai.tools import AI_TOOLS_SCHEMA, SafeToolExecutor
 logger = logging.getLogger(__name__)
 
 
-def sanitize_message_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+def sanitize_message_history(history: List[Dict[str, Any]], complete_trailing: bool = True) -> List[Dict[str, Any]]:
     """
     Sanitizes message history for OpenAI / OpenRouter Chat Completion API compliance.
     Ensures that every 'tool' message sequence is properly opened by an 'assistant' message
     with 'tool_calls' and properly closed by an 'assistant' response before any subsequent 'user' message.
+    If complete_trailing is True, also appends a synthetic assistant message if the history ends with a tool message.
+    When complete_trailing is False (default for follow-up turns in ReAct loop), trailing tool messages are kept
+    so the LLM receives the tool response and generates the final assistant response.
     """
     if not history:
         return []
@@ -52,7 +55,7 @@ def sanitize_message_history(history: List[Dict[str, Any]]) -> List[Dict[str, An
             in_tool_sequence = False
             sanitized.append(msg)
 
-    if in_tool_sequence:
+    if complete_trailing and in_tool_sequence:
         sanitized.append({
             "role": "assistant",
             "content": "Operation completed."
@@ -109,10 +112,11 @@ class VideoAIAgent:
                 res = f"Resolution: {m.resolution_label}, " if (m and m.has_video) else ""
                 dur = f"Duration: {int(m.duration_seconds)}s, " if m else ""
                 size = f"Size: {format_bytes(m.file_size_bytes)}" if m else ""
-                lines.append(f"- [{aid}] {a['filename']} ({a.get('media_type', 'media').upper()}: {res}{dur}{size})")
+                tag = " [ORIGINAL USER SOURCE VIDEO]" if aid == "v1" else ""
+                lines.append(f"- [{aid}] {a['filename']} ({a.get('media_type', 'media').upper()}: {res}{dur}{size}){tag}")
             assets_section = "### AVAILABLE SESSION ASSETS:\n" + "\n".join(lines) + "\n\n"
         elif self.meta:
-            assets_section = f"### AVAILABLE SESSION ASSETS:\n- [v1] {self.meta.file_name} (VIDEO: {self.meta.resolution_label}, {int(self.meta.duration_seconds)}s)\n\n"
+            assets_section = f"### AVAILABLE SESSION ASSETS:\n- [v1] {self.meta.file_name} (VIDEO: {self.meta.resolution_label}, {int(self.meta.duration_seconds)}s) [ORIGINAL USER SOURCE VIDEO]\n\n"
 
         # Host environment info
         host_info = (
@@ -138,7 +142,7 @@ class VideoAIAgent:
             f"{skills_context}\n\n"
             "### OPERATIONAL GUIDELINES (STRICT):\n"
             "1. **Action Requests vs Informational Questions:**\n"
-            "   - If the user asks you to DO or CHANGE something (e.g. 'optimize it', 'remove audio', 'mute', 'add audio', 'replace audio', 'fix lag', 'make it smooth', 'convert', 'downscale'):\n"
+            "   - If the user asks you to DO or CHANGE something (e.g. 'optimize it', 'remove audio', 'mute', 'add audio', 'replace audio', 'fix lag', 'make it smooth', 'convert', 'downscale', 'black and white'):\n"
             "     NEVER call `diagnose_video`! `diagnose_video` is STRICTLY reserved for pure questions like 'Why does this video lag on my phone?' when the user asks for an explanation without any editing command.\n"
             "     For any action request, you must call `execute_ffmpeg_plan` or ask the user for missing files directly.\n"
             "2. **Resolution & Quality Guardrails (DO NOT DROP QUALITY):**\n"
@@ -157,12 +161,37 @@ class VideoAIAgent:
             "   - When reviewing tool execution results, formulate a logical assistant response:\n"
             "     * If the overall user goal was only partially completed because it requires additional input from the user (such as sending a new audio track or another clip), DO NOT ask if they are satisfied. Instead, clearly prompt them for the required missing file or next step.\n"
             "     * If the requested operation is fully completed, ask what they would like to do next with this file or if they got the expected result.\n"
-            "5. **Multi-Asset Referencing & Deliverable Chaining:**\n"
-            "   - When deliverables are generated, they are registered as session assets (e.g. [v2], [a1]). Use the latest processed deliverable as the primary input when performing follow-up tasks on it unless the user specifies otherwise.\n"
+            "5. **Multi-Asset Referencing & Target Selection ('original' vs 'latest'):**\n"
+            "   - If the user explicitly asks for the 'original video', 'source video', 'from scratch', 'initial video', or 'first video':\n"
+            "     You MUST set `inputs: ['v1']` so that the operation applies directly to the original user source video! NEVER use an intermediate deliverable like `original_slowed.mp4` or a muted file when the user asks for the original video.\n"
+            "   - When deliverables are generated, they are registered as session assets (e.g. [v2], [a1]). If the user says 'this video', 'with this', 'continue', 'in this', or does not specify 'original', use the latest processed deliverable as the primary input.\n"
             "6. **Memory Safety on Snapdragon / Low RAM:** NEVER buffer unbounded frames into RAM. If user asks to reverse a video "
             "> 30s or > 720p, inform them or downscale to 720p.\n"
             "7. **No Emojis:** Do NOT include any emojis or emoji symbols in your responses. Output only plain, professional text.\n"
-            "8. **New Asset Uploaded:** If the user provides a new asset (e.g. [a1]) following a previous discussion or request to merge/replace/add audio or video, immediately call `execute_ffmpeg_plan` using the latest video asset (e.g. [v2] or [v1]) and the new audio asset (e.g. [a1]) to perform the merge/replacement."
+            "8. **New Asset Uploaded:** If the user provides a new asset (e.g. [a1]) following a previous discussion or request to merge/replace/add audio or video, immediately call `execute_ffmpeg_plan` using the latest video asset (e.g. [v2] or [v1]) and the new audio asset (e.g. [a1]) to perform the merge/replacement.\n"
+            "9. **Unrealistic & Impossible Demands (STRICT REFUSAL GUARDRAIL):**\n"
+            "   - If the user demands an impossible, unrealistic, or fake operation, such as:\n"
+            "     * Upscaling a 1080p, 720p, 480p, or 360p video to 4K UHD, 1440p, or 8K.\n"
+            "     * 'Make it 4K', 'convert 1080p to 4K', 'upscale to UHD', 'improve resolution to 4K'.\n"
+            "     * Extracting or recovering audio from a silent video that has no audio stream (`has_audio: False` or `audio_codec: None`).\n"
+            "     * Generative changes that FFmpeg cannot do (e.g. 'remove person from background', 'change camera angle', 'invent new scenes').\n"
+            "     DO NOT call `execute_ffmpeg_plan`! DO NOT fake resolution scaling (e.g. `scale=3840:2160`)! Upscaling creates bloated, unplayable files without adding any real optical detail.\n"
+            "     Instead, directly refuse the request in plain conversational text. Explicitly state: 'I cannot fulfill this request because upscaling a 1080p video to 4K is an unrealistic demand. True resolution and optical detail cannot be synthesized with FFmpeg and only inflates file size with no quality improvement. I can, however, optimize, sharpen, or apply color grading at its native resolution.'\n"
+            "10. **Creative & Visual Filters (DO NOT EXTRACT FRAMES UNLESS REQUESTED):**\n"
+            "   - When the user asks for 'black and white', 'b&w', 'grayscale', or 'monochrome':\n"
+            "     Always use video filter `vf_filter='hue=s=0'`, keep `video_codec='libx264'`, `crf=22`, and preserve audio with `audio_codec='aac'`! NEVER set `-frames:v 1`, `-ss`, or create single image files (like `.jpg.mp4`)!\n"
+            "   - When the user asks for sepia: use `vf_filter='colorchannelmixer=.393:.769:.189:0:.349:.686:.168:0:.272:.534:.131'`.\n"
+            "   - When the user asks for vibrant / saturation: use `vf_filter='hue=s=1.5'`.\n"
+            "   - When the user asks for brightness/contrast: use `vf_filter='eq=brightness=0.06:contrast=1.15'`.\n"
+            "   - When the user asks for mirror / flip: use `vf_filter='hflip'` or `vf_filter='vflip'`.\n"
+            "   - When the user asks for rotate: use `vf_filter='transpose=1'` (90 deg clockwise) or `transpose=2` (counter-clockwise).\n"
+            "   - When the user asks for negative / invert: use `vf_filter='negate'`.\n"
+            "   - When the user asks for sharpness: use `vf_filter='unsharp=5:5:1.0:5:5:0.0'`.\n"
+            "   - When the user asks for blur: use `vf_filter='boxblur=5:2'`.\n"
+            "11. **Output FFprobe Awareness & Post-Execution Response:**\n"
+            "   - When a tool produces output deliverables, you will receive its exact verified `ffprobe` metadata (resolution, codec, bitrate, duration, file size).\n"
+            "   - In your follow-up conversational response, explicitly acknowledge what you generated citing these verified specs (e.g. resolution, duration, file size).\n"
+            "   - If the task is finished, ask what they would like to do next or if they are satisfied with the result. If a further step is needed (such as sending a new soundtrack), ask them to send the file."
         )
 
     async def process_message(
@@ -198,10 +227,12 @@ class VideoAIAgent:
             }
 
         tool_calls = assistant_msg.get("tool_calls")
-        content = assistant_msg.get("content") or ""
+        content = (assistant_msg.get("content") or "").strip()
 
         # If no tool calls, pure conversational reply
         if not tool_calls:
+            if not content:
+                content = "I have processed your request. What would you like to do next?"
             self.history.append({"role": "assistant", "content": content})
             return {
                 "status": "success",
@@ -292,20 +323,36 @@ class VideoAIAgent:
         primary_result = execution_results[0] if execution_results else {"status": "success", "type": "none"}
 
         # Follow-up completion turn so the model evaluates tool results and produces assistant response
+        # tools MUST be None here so the model provides a final conversational answer instead of an unexpected tool call
         try:
-            follow_up_messages = [{"role": "system", "content": self._build_system_prompt(user_text)}] + sanitize_message_history(self.history)[-8:]
+            follow_up_messages = [{"role": "system", "content": self._build_system_prompt(user_text)}] + sanitize_message_history(self.history, complete_trailing=False)[-8:]
             follow_up_msg = await self.client.chat_completion(
                 messages=follow_up_messages,
-                tools=AI_TOOLS_SCHEMA,
+                tools=None,
                 preferred_model=self.preferred_model
             )
-            follow_up_content = follow_up_msg.get("content") or ""
+            follow_up_content = (follow_up_msg.get("content") or "").strip()
+            if not follow_up_content:
+                out_ffprobe = primary_result.get("ffprobe") or {}
+                res_str = out_ffprobe.get("resolution", primary_result.get("resolution", ""))
+                size_str = out_ffprobe.get("formatted_size", primary_result.get("formatted_size", ""))
+                dur_str = out_ffprobe.get("formatted_duration", primary_result.get("duration", ""))
+                spec_note = f" ({res_str}, {size_str}, {dur_str})" if (res_str and size_str) else ""
+                follow_up_content = (
+                    f"I have successfully executed the operation: {primary_result.get('plan_title', 'video processing')}{spec_note}. "
+                    "What would you like to do next with this file?"
+                )
             self.history.append({"role": "assistant", "content": follow_up_content})
             primary_result["assistant_text"] = follow_up_content
         except Exception as follow_up_err:
             logger.warning(f"Error in follow-up AI completion: {follow_up_err}")
+            out_ffprobe = primary_result.get("ffprobe") or {}
+            res_str = out_ffprobe.get("resolution", primary_result.get("resolution", ""))
+            size_str = out_ffprobe.get("formatted_size", primary_result.get("formatted_size", ""))
+            dur_str = out_ffprobe.get("formatted_duration", primary_result.get("duration", ""))
+            spec_note = f" ({res_str}, {size_str}, {dur_str})" if (res_str and size_str) else ""
             fallback_text = (
-                f"I have executed the operation: {primary_result.get('plan_title', 'video processing')}. "
+                f"I have executed the operation: {primary_result.get('plan_title', 'video processing')}{spec_note}. "
                 "What would you like to do next with this file?"
             )
             self.history.append({"role": "assistant", "content": fallback_text})
