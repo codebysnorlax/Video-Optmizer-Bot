@@ -67,9 +67,6 @@ async def build_start_dashboard(user_id: int, user_name: str) -> tuple[str, list
         [
             Button.inline("System Diagnostics", data=b"dash_hw"),
             Button.inline("Help & Guide", data=b"dash_help")
-        ],
-        [
-            Button.inline("AI Model Settings", data=b"aimod_page:0")
         ]
     ]
     return text, buttons
@@ -112,6 +109,7 @@ async def handle_help(event: events.NewMessage.Event) -> None:
         "**Available Commands:**\n"
         "• `/start` - Open the main dashboard\n"
         "• `/files` - View, recall, or delete server cached files\n"
+        "• `/ai_setting` - Select active OpenRouter free AI model\n"
         "• `/stats` - View your total saved bandwidth and usage statistics\n"
         "• `/hardware` - View host hardware acceleration & system diagnostics\n"
         "• `/history` - View your recent tasks\n"

@@ -306,3 +306,5 @@ def test_build_ai_models_menu_and_no_emojis():
         for btn in row:
             for em in emoji_chars:
                 assert em not in btn.text, f"Emoji '{em}' found in button text '{btn.text}'"
+
+    assert any(b"aimod_close" in btn.type.data for row in menu_p0 for btn in row)

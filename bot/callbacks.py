@@ -346,6 +346,13 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         await event.answer("Refreshed free models from OpenRouter!")
         return
 
+    if action_type == "aimod_close":
+        try:
+            await event.delete()
+        except Exception:
+            pass
+        return
+
     # 2. Main Menu Navigation
     if action_type == "main_menu":
         task_id = parts[1]

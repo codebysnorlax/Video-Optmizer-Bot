@@ -77,7 +77,7 @@ def build_ai_models_menu(models: list, current_model: str, page: int = 0, page_s
 
     buttons.append([
         Button.inline("Refresh Models", data=b"aimod_ref"),
-        Button.inline("< Dashboard", data=b"dash_home")
+        Button.inline("Close Menu", data=b"aimod_close")
     ])
     return buttons
 

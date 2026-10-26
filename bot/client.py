@@ -26,7 +26,7 @@ async def register_bot_menu_commands(client: TelegramClient) -> None:
     commands = [
         types.BotCommand(command="start", description="Start the bot and view instructions"),
         types.BotCommand(command="help", description="How to optimize and convert videos"),
-        types.BotCommand(command="model", description="Configure AI OpenRouter free model"),
+        types.BotCommand(command="ai_setting", description="Configure AI free model settings"),
         types.BotCommand(command="files", description="View, recall, or delete server cached files"),
         types.BotCommand(command="hardware", description="View CPU/GPU hardware acceleration info"),
         types.BotCommand(command="stats", description="View total bandwidth saved & task count"),
@@ -86,7 +86,7 @@ def create_bot_client() -> TelegramClient:
     async def _files(event):
         await handle_files(event)
 
-    @client.on(events.NewMessage(pattern=r"^/(model|ai_settings)$"))
+    @client.on(events.NewMessage(pattern=r"^/(ai[-_]settings?|model)$"))
     async def _model(event):
         await handle_ai_models(event)
 

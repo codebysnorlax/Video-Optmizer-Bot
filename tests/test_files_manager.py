@@ -204,12 +204,11 @@ async def test_start_dashboard():
     assert "1. Convert to 720p" in text
     assert "2. Convert to 1080p" in text
     assert "3. Auto Recommended" in text
-    assert len(buttons) == 3
+    assert len(buttons) == 2
     assert b"flist:0" in buttons[0][0].type.data
     assert b"dash_stats" in buttons[0][1].type.data
     assert b"dash_hw" in buttons[1][0].type.data
     assert b"dash_help" in buttons[1][1].type.data
-    assert b"aimod_page:0" in buttons[2][0].type.data
 
 
 def test_task_cancellation_keyboards():
