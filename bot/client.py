@@ -96,12 +96,20 @@ def create_bot_client() -> TelegramClient:
         # Ignore commands
         if event.raw_text and event.raw_text.startswith("/"):
             return
-        if is_video_message(event.message):
+        from bot.media_handler import is_video_message, is_audio_message, handle_incoming_media, handle_incoming_session_asset
+        from bot.task_manager import task_manager
+
+        is_video = is_video_message(event.message)
+        is_audio = is_audio_message(event.message)
+        active_task = task_manager.get_active_ai_task_for_user(event.sender_id)
+
+        if active_task and (is_audio or is_video):
+            await handle_incoming_session_asset(event, active_task, client)
+            return
+
+        if is_video:
             await handle_incoming_media(event, client)
         elif event.raw_text:
-            # Check if user has an active AI Manual session
-            from bot.task_manager import task_manager
-            active_task = task_manager.get_active_ai_task_for_user(event.sender_id)
             if active_task:
                 from bot.ai_handler import handle_ai_user_text
                 await handle_ai_user_text(event, active_task, client)

@@ -28,7 +28,8 @@ class VideoAIAgent:
         input_path: Path,
         meta: Optional[MediaMetadata] = None,
         client: Optional[OpenRouterClient] = None,
-        preferred_model: Optional[str] = None
+        preferred_model: Optional[str] = None,
+        assets: Optional[Dict[str, Any]] = None
     ):
         self.user_id = user_id
         self.task_id = task_id
@@ -36,11 +37,12 @@ class VideoAIAgent:
         self.meta = meta
         self.client = client or ai_client
         self.preferred_model = preferred_model
+        self.assets = assets or {}
         self.history: List[Dict[str, Any]] = []
-        self.tool_executor = SafeToolExecutor(user_id, task_id, input_path, meta)
+        self.tool_executor = SafeToolExecutor(user_id, task_id, input_path, meta, assets=self.assets)
 
     def _build_system_prompt(self, user_prompt: str) -> str:
-        """Constructs a comprehensive, token-efficient system prompt with video metadata and dynamic skills."""
+        """Constructs a comprehensive, token-efficient system prompt with video metadata, session assets, and dynamic skills."""
         # Video context summary
         video_info = "No video metadata available."
         if self.meta:
@@ -55,6 +57,20 @@ class VideoAIAgent:
                 f"- Overall Bitrate: ~{self.meta.overall_bitrate_kbps} kbps"
             )
 
+        # Available session assets
+        assets_section = ""
+        if self.assets:
+            lines = []
+            for aid, a in self.assets.items():
+                m = a.get("meta")
+                res = f"Resolution: {m.resolution_label}, " if (m and m.has_video) else ""
+                dur = f"Duration: {int(m.duration_seconds)}s, " if m else ""
+                size = f"Size: {format_bytes(m.file_size_bytes)}" if m else ""
+                lines.append(f"- [{aid}] {a['filename']} ({a.get('media_type', 'media').upper()}: {res}{dur}{size})")
+            assets_section = "### AVAILABLE SESSION ASSETS:\n" + "\n".join(lines) + "\n\n"
+        elif self.meta:
+            assets_section = f"### AVAILABLE SESSION ASSETS:\n- [v1] {self.meta.file_name} (VIDEO: {self.meta.resolution_label}, {int(self.meta.duration_seconds)}s)\n\n"
+
         # Host environment info
         host_info = (
             f"- Host OS: {current_hardware.os_name} ({current_hardware.arch})\n"
@@ -67,10 +83,11 @@ class VideoAIAgent:
         skills_context = skill_registry.get_relevant_skills(user_prompt)
 
         return (
-            "You are the **AI Video Engineer & Optimization Specialist** for a high-performance Telegram bot.\n"
-            "You assist users by diagnosing why videos lag, stutter, or have huge file size, and executing custom "
-            "optimizations, format conversions, aspect ratio changes, or creative modifications (reverse, speed, etc.).\n\n"
-            "### CURRENT TARGET VIDEO METADATA:\n"
+            "You are the **AI Video & Audio Engineer** for a high-performance Telegram bot.\n"
+            "You assist users by diagnosing why media lags or has huge file size, and executing custom "
+            "optimizations, format conversions, stream extractions (audio-only, video-only), audio replacement, or multi-file edits.\n\n"
+            f"{assets_section}"
+            "### CURRENT PRIMARY VIDEO METADATA:\n"
             f"{video_info}\n\n"
             "### HOST ENVIRONMENT CONSTRAINTS:\n"
             f"{host_info}\n\n"
@@ -78,12 +95,12 @@ class VideoAIAgent:
             f"{skills_context}\n\n"
             "### OPERATIONAL GUIDELINES:\n"
             "1. **Diagnostic Questions:** If user asks why the video lags, why size is huge, or about device compatibility, "
-            "call the `diagnose_video` tool or explain clearly based on the metadata above, explaining the root cause.\n"
-            "2. **Editing / Conversion Requests:** If user asks to change resolution, downscale, reverse, change ratio (e.g. 9:16), "
-            "or optimize, call the `execute_ffmpeg_plan` tool with appropriate filter chains.\n"
-            "3. **Memory Safety on Snapdragon / Low RAM:** NEVER buffer unbounded frames into RAM. If user asks to reverse a video "
+            "call the `diagnose_video` tool or explain clearly based on the metadata above.\n"
+            "2. **Editing / Conversion / Extraction:** Call `execute_ffmpeg_plan`. You can specify single or multiple operations/outputs "
+            "(e.g. producing separate video and audio files, muting, or replacing audio).\n"
+            "3. **Multi-Asset Referencing:** Reference session assets by their keys (e.g. 'v1', 'a1') in the inputs list.\n"
+            "4. **Memory Safety on Snapdragon / Low RAM:** NEVER buffer unbounded frames into RAM. If user asks to reverse a video "
             "> 30s or > 720p, inform them or downscale to 720p.\n"
-            "4. **Tone & Style:** Be concise, professional, technically accurate, and user-friendly.\n"
             "5. **No Emojis:** Do NOT include any emojis or emoji symbols in your responses. Output only plain, professional text."
         )
 
@@ -164,11 +181,17 @@ class VideoAIAgent:
                 res = await self.tool_executor.run_execute_ffmpeg(
                     plan_title=args.get("plan_title", "Custom AI Optimization"),
                     output_filename=args.get("output_filename", "ai_optimized.mp4"),
+                    operations=args.get("operations"),
+                    inputs=args.get("inputs"),
+                    extract_audio_only=args.get("extract_audio_only", False),
+                    mute_video_only=args.get("mute_video_only", False),
                     vf_filter=args.get("vf_filter"),
                     af_filter=args.get("af_filter"),
                     video_codec=args.get("video_codec", "libx264"),
                     crf=args.get("crf", 22),
                     audio_codec=args.get("audio_codec", "aac"),
+                    stream_mapping=args.get("stream_mapping"),
+                    extra_args=args.get("extra_args"),
                     progress_callback=progress_callback,
                     on_process_started=on_process_started
                 )

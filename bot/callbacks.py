@@ -104,6 +104,16 @@ async def _delayed_hide_buttons(msg: Any, delay: float = 5.0) -> None:
         pass
 
 
+async def _safe_delayed_hide(event: Any, delay: float = 5.0) -> None:
+    """Safely retrieves message from CallbackQuery event and schedules button hiding."""
+    try:
+        msg = await event.get_message()
+        if msg:
+            await _delayed_hide_buttons(msg, delay=delay)
+    except Exception:
+        pass
+
+
 async def get_or_restore_task_ctx(task_id: str, event: events.CallbackQuery.Event) -> Optional[TaskContext]:
     """
     Retrieves active TaskContext, or seamlessly reloads it from the server's original downloaded file cache.
@@ -492,7 +502,7 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             )
             await event.edit(final_text, buttons=build_cleanup_finished_menu(task_id))
             await event.answer(alert_msg, alert=False)
-            asyncio.create_task(_delayed_hide_buttons(event.message, delay=5.0))
+            asyncio.create_task(_safe_delayed_hide(event, delay=5.0))
             return
 
         opt_name = Path(out_path).name if out_path else "processed_video"
@@ -561,7 +571,7 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         )
         await event.edit(final_text, buttons=build_cleanup_finished_menu(task_id))
         await event.answer(alert_msg, alert=False)
-        asyncio.create_task(_delayed_hide_buttons(event.message, delay=5.0))
+        asyncio.create_task(_safe_delayed_hide(event, delay=5.0))
         return
 
     # 5c. Done button (hide options and preserve all details)

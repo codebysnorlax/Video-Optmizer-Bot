@@ -62,8 +62,12 @@ async def handle_ai_session_start(event, task_ctx, client) -> None:
             task_id=task_id,
             input_path=task_ctx.input_path,
             meta=task_ctx.meta,
-            preferred_model=active_model
+            preferred_model=active_model,
+            assets=task_ctx.get_assets()
         )
+    else:
+        task_ctx.ai_agent.assets = task_ctx.get_assets()
+        task_ctx.ai_agent.tool_executor.assets = task_ctx.get_assets()
 
     task_ctx.ai_session_active = True
     task_ctx.ai_workplace_dir = settings.get_ai_workplace(user_id, task_id)
@@ -73,19 +77,23 @@ async def handle_ai_session_start(event, task_ctx, client) -> None:
         pass
 
     ai_card = (
-        "**AI Video Engineer Activated**\n\n"
-        f"• **Target Video:** `{task_ctx.meta.file_name}`\n"
+        "**AI Video Assistant**\n\n"
+        f"• **Session Target:** `{task_ctx.meta.file_name}`\n"
         f"• **Current Specs:** `{task_ctx.meta.resolution_label}` | `{format_bytes(task_ctx.meta.file_size_bytes)}` | `{int(task_ctx.meta.duration_seconds)}s`\n"
         f"• **Active Model:** `{active_model}`\n"
         f"• **Engine:** `{current_hardware.description}`\n"
         f"• **Sandbox:** `storage/Ai_Workplace/{user_id}_{task_id}/`\n\n"
-        "• **Instructions:** Type your question or instruction directly in the chat below, for example:\n"
+        "**Conversational Problem Solving:**\n"
+        "You are not limited to fixed commands. Type any request or question directly in chat:\n"
+        " - *\"Can you give me separate audio and video from that video?\"*\n"
         " - *\"Why does this video lag on my phone?\"*\n"
         " - *\"Why is the file size so huge?\"*\n"
         " - *\"Downscale this from 4K to 1080p without losing quality\"*\n"
-        " - *\"Change aspect ratio to 9:16 vertical\"*\n"
-        " - *\"Reverse this video\"*\n\n"
-        "Or select a quick action below:"
+        " - *\"Extract the audio as MP3\"*\n"
+        " - *\"Mute this video and remove all audio tracks\"*\n"
+        " - *\"Change aspect ratio to 9:16 vertical or reverse video\"*\n\n"
+        "**Multi-File Workflows:** You can send another audio or video file right now into this chat, and ask to replace soundtracks, remux, or combine them.\n\n"
+        "Or choose an example action below:"
     )
 
     await event.edit(ai_card, buttons=build_ai_session_menu(task_id))
@@ -95,6 +103,8 @@ async def handle_ai_session_start(event, task_ctx, client) -> None:
 async def handle_ai_quick_prompt(event, preset: str, task_ctx, client) -> None:
     """Handles preset one-tap prompt buttons."""
     prompt_map = {
+        "split": "Separate this video into two distinct deliverables: a muted video track and an extracted MP3 audio track, and deliver both.",
+        "extract_audio": "Extract the audio track from this video as an MP3 audio file.",
         "lag": "Why does this video lag on my phone, and how can I optimize it for smooth playback?",
         "1080": "Downscale this video from its current resolution to 1080p FHD preserving maximum visual quality and web streaming faststart.",
         "916": "Convert this video to 9:16 vertical aspect ratio with blurred background borders for Instagram Reels / TikTok.",
@@ -143,8 +153,12 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
             task_id=task_id,
             input_path=task_ctx.input_path,
             meta=task_ctx.meta,
-            preferred_model=active_model
+            preferred_model=active_model,
+            assets=task_ctx.get_assets()
         )
+    else:
+        task_ctx.ai_agent.assets = task_ctx.get_assets()
+        task_ctx.ai_agent.tool_executor.assets = task_ctx.get_assets()
 
     # Run agent reasoning turn
     result = await task_ctx.ai_agent.process_message(user_prompt)
@@ -185,9 +199,18 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
 
     # 3. Transcode Execution Result (Tool already executed FFmpeg)
     if result.get("type") == "transcode":
-        out_path = Path(result["output_path"])
-        task_ctx.output_path = out_path
-        asyncio.create_task(deliver_ai_output(task_ctx, result["plan_title"], out_path, status_msg, client))
+        raw_paths = result.get("output_paths") or [result.get("output_path")]
+        out_paths = [Path(p) for p in raw_paths if p]
+        if out_paths:
+            task_ctx.output_path = out_paths[0]
+        asyncio.create_task(deliver_ai_results(
+            task_ctx,
+            result.get("plan_title", "AI Result"),
+            out_paths,
+            status_msg,
+            client,
+            deliverables=result.get("deliverables")
+        ))
         return
 
     # 4. Pure Text / Conversational Response
@@ -260,15 +283,21 @@ async def run_and_deliver_ai_plan(task_ctx, plan: Dict[str, Any], status_msg, cl
             await updater.update(text, buttons=build_task_progress_menu(task_id))
 
         # Run safe tool executor
-        executor = task_ctx.ai_agent.tool_executor if task_ctx.ai_agent else SafeToolExecutor(user_id, task_id, task_ctx.input_path, meta)
+        executor = task_ctx.ai_agent.tool_executor if task_ctx.ai_agent else SafeToolExecutor(user_id, task_id, task_ctx.input_path, meta, assets=task_ctx.get_assets())
         res = await executor.run_execute_ffmpeg(
             plan_title=plan.get("plan_title", "AI Processing"),
             output_filename=plan.get("output_filename", "ai_output.mp4"),
+            operations=plan.get("operations"),
+            inputs=plan.get("inputs"),
+            extract_audio_only=plan.get("extract_audio_only", False),
+            mute_video_only=plan.get("mute_video_only", False),
             vf_filter=plan.get("vf_filter"),
             af_filter=plan.get("af_filter"),
             video_codec=plan.get("video_codec", "libx264"),
             crf=plan.get("crf", 22),
             audio_codec=plan.get("audio_codec", "aac"),
+            stream_mapping=plan.get("stream_mapping"),
+            extra_args=plan.get("extra_args"),
             progress_callback=transcode_progress,
             on_process_started=lambda p: setattr(task_ctx, "current_process", p)
         )
@@ -283,87 +312,142 @@ async def run_and_deliver_ai_plan(task_ctx, plan: Dict[str, Any], status_msg, cl
             )
             return
 
-        out_path = Path(res["output_path"])
-        task_ctx.output_path = out_path
-        await deliver_ai_output(task_ctx, plan.get("plan_title", "AI Optimization"), out_path, status_msg, client)
+        raw_paths = res.get("output_paths") or [res.get("output_path")]
+        out_paths = [Path(p) for p in raw_paths if p]
+        if out_paths:
+            task_ctx.output_path = out_paths[0]
+        task_ctx.processing_elapsed_time = max(0.1, time.time() - start_time)
+        await deliver_ai_results(
+            task_ctx,
+            plan.get("plan_title", "AI Optimization"),
+            out_paths,
+            status_msg,
+            client,
+            deliverables=res.get("deliverables")
+        )
 
 
-async def deliver_ai_output(task_ctx, plan_title: str, out_path: Path, status_msg, client) -> None:
-    """Uploads the completed AI video output with progress reporting and cleanup prompt."""
+async def deliver_ai_results(
+    task_ctx,
+    plan_title: str,
+    out_paths: List[Path],
+    status_msg,
+    client,
+    deliverables: Optional[List[Dict[str, Any]]] = None
+) -> None:
+    """Uploads multiple completed AI deliverables sequentially with progress reporting and cleanup prompt."""
     task_id = task_ctx.task_id
     user_id = task_ctx.user_id
     meta = task_ctx.meta
 
-    # Register in file cache
-    await register_file_cache(
-        task_id=task_id,
-        user_id=user_id,
-        input_path=str(task_ctx.input_path),
-        output_path=str(out_path)
-    )
+    valid_paths = [Path(p) for p in out_paths if Path(p).exists()]
+    total_deliverables = len(valid_paths)
 
-    # Live upload progress
-    task_ctx.current_stage = "uploading"
-    task_ctx.active_stage_label = "Uploading AI Output"
-    upload_start = time.time()
-    updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
-
-    async def upload_progress(current_bytes: int, total_bytes: int):
-        if task_ctx.is_cancelled:
-            raise asyncio.CancelledError()
-        percent = (current_bytes / total_bytes * 100) if total_bytes > 0 else 0
-        bar = make_progress_bar(percent)
-        cur_mb = current_bytes / (1024 * 1024)
-        tot_mb = total_bytes / (1024 * 1024)
-        elapsed = max(0.1, time.time() - upload_start)
-        speed_mb = (current_bytes / elapsed) / (1024 * 1024)
-        eta = int((total_bytes - current_bytes) / max(1, current_bytes / elapsed))
-        text = (
-            f"**Uploading AI Result: {plan_title}**\n\n"
-            f"• **Progress:** {bar} `{percent:.1f}%`\n"
-            f"• **Uploaded:** `{cur_mb:.1f} MB / {tot_mb:.1f} MB`\n"
-            f"• **Speed:** `{speed_mb:.1f} MB/s` | **ETA:** `{eta}s`"
+    if total_deliverables == 0:
+        await status_msg.edit(
+            "**AI Notice:** No output deliverables were found to upload.",
+            buttons=build_ai_session_menu(task_id)
         )
-        await updater.update(text, buttons=build_task_progress_menu(task_id))
-
-    try:
-        uploaded_doc = await fast_upload(
-            client=client,
-            file_path=out_path,
-            progress_callback=upload_progress
-        )
-    except Exception as e:
-        logger.error(f"AI output upload failed: {e}")
-        await status_msg.edit(f"**Upload Failed:** {str(e)}", buttons=build_ai_session_menu(task_id))
         task_ctx.is_processing = False
         return
 
-    # Probe output metadata for before/after comparison card
-    out_meta = await probe_media(out_path)
-    before_after = format_before_after_analysis(meta, out_meta)
+    # Live upload progress
+    task_ctx.current_stage = "uploading"
+    task_ctx.active_stage_label = f"Uploading AI Results ({total_deliverables} files)"
+    updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
+    total_output_size = 0
 
-    caption = (
-        f"**AI Video Optimization Complete**\n"
-        f"• **Plan Applied:** `{plan_title}`\n\n"
-        f"{before_after}"
-    )
+    for idx, out_path in enumerate(valid_paths, start=1):
+        if task_ctx.is_cancelled:
+            task_ctx.is_processing = False
+            return
 
-    # Deliver video file
-    await client.send_file(
-        entity=user_id,
-        file=uploaded_doc,
-        caption=caption,
-        supports_streaming=True
-    )
+        # Register in file cache
+        await register_file_cache(
+            task_id=task_id,
+            user_id=user_id,
+            input_path=str(task_ctx.input_path),
+            output_path=str(out_path)
+        )
+
+        upload_start = time.time()
+
+        async def upload_progress(current_bytes: int, total_bytes: int):
+            if task_ctx.is_cancelled:
+                raise asyncio.CancelledError()
+            percent = (current_bytes / total_bytes * 100) if total_bytes > 0 else 0
+            bar = make_progress_bar(percent)
+            cur_mb = current_bytes / (1024 * 1024)
+            tot_mb = total_bytes / (1024 * 1024)
+            elapsed = max(0.1, time.time() - upload_start)
+            speed_mb = (current_bytes / elapsed) / (1024 * 1024)
+            eta = int((total_bytes - current_bytes) / max(1, current_bytes / elapsed))
+            text = (
+                f"**Uploading Deliverable ({idx}/{total_deliverables})**\n\n"
+                f"• **Plan:** `{plan_title}`\n"
+                f"• **File:** `{out_path.name}`\n"
+                f"• **Progress:** {bar} `{percent:.1f}%`\n"
+                f"• **Uploaded:** `{cur_mb:.1f} MB / {tot_mb:.1f} MB`\n"
+                f"• **Speed:** `{speed_mb:.1f} MB/s` | **ETA:** `{eta}s`"
+            )
+            await updater.update(text, buttons=build_task_progress_menu(task_id))
+
+        try:
+            uploaded_doc = await fast_upload(
+                client=client,
+                file_path=out_path,
+                progress_callback=upload_progress
+            )
+        except Exception as e:
+            logger.error(f"AI output upload failed for {out_path.name}: {e}")
+            await status_msg.edit(
+                f"**Upload Failed on {out_path.name}:** {str(e)}",
+                buttons=build_ai_session_menu(task_id)
+            )
+            task_ctx.is_processing = False
+            return
+
+        out_meta = await probe_media(out_path)
+        file_size = out_path.stat().st_size
+        total_output_size += file_size
+
+        if out_meta and out_meta.has_video:
+            before_after = format_before_after_analysis(meta, out_meta)
+            caption = (
+                f"**AI Deliverable ({idx}/{total_deliverables})**\n"
+                f"• **Plan Applied:** `{plan_title}`\n"
+                f"• **Deliverable:** `{out_path.name}`\n\n"
+                f"{before_after}"
+            )
+            supports_streaming = True
+        else:
+            dur_str = format_duration(out_meta.duration_seconds) if out_meta else "Unknown"
+            caption = (
+                f"**AI Deliverable ({idx}/{total_deliverables})**\n"
+                f"• **Plan Applied:** `{plan_title}`\n"
+                f"• **Deliverable:** `{out_path.name}`\n"
+                f"• **Type:** Extracted Audio Track\n"
+                f"• **Size:** `{format_bytes(file_size)}` | **Duration:** `{dur_str}`"
+            )
+            supports_streaming = False
+
+        # Deliver file to user
+        await client.send_file(
+            entity=user_id,
+            file=uploaded_doc,
+            caption=caption,
+            supports_streaming=supports_streaming
+        )
 
     # Record complete in DB
-    saved_bytes = max(0, meta.file_size_bytes - out_path.stat().st_size)
-    await record_task_complete(task_id, saved_bytes)
+    elapsed_time = getattr(task_ctx, "processing_elapsed_time", 1.0)
+    await record_task_complete(task_id, output_size=total_output_size, elapsed_time=elapsed_time)
 
     # Prompt user for disk cleanup
     disk = settings.get_disk_usage()
+    file_plural = "Deliverable" if total_deliverables == 1 else "Deliverables"
     cleanup_prompt = (
-        "**Video Delivered Successfully**\n\n"
+        f"**{file_plural} Delivered Successfully ({total_deliverables} files)**\n\n"
         f"• **Server Storage:** `{disk['free_gb']} GB free` ({disk['percent_used']}% used)\n"
         f"• **Temporary Sandbox:** `storage/Ai_Workplace/{user_id}_{task_id}/`\n\n"
         "Choose file retention options below:"
@@ -371,3 +455,8 @@ async def deliver_ai_output(task_ctx, plan_title: str, out_path: Path, status_ms
     await status_msg.edit(cleanup_prompt, buttons=build_cleanup_original_menu(task_id))
     task_ctx.is_processing = False
     task_ctx.ai_session_active = False
+
+
+async def deliver_ai_output(task_ctx, plan_title: str, out_path: Path, status_msg, client) -> None:
+    """Compatibility wrapper uploading a single AI output."""
+    await deliver_ai_results(task_ctx, plan_title, [out_path], status_msg, client)

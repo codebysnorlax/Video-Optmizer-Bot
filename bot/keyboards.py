@@ -23,12 +23,16 @@ def build_ai_session_menu(task_id: str) -> List[List[Button]]:
     """Builds interactive prompt shortcuts and Exit control for AI Manual mode."""
     return [
         [
-            Button.inline("Why is it lagging?", data=f"ai_quick:lag:{task_id}".encode()),
+            Button.inline("Separate Video & Audio", data=f"ai_quick:split:{task_id}".encode()),
+            Button.inline("Extract MP3 Audio", data=f"ai_quick:extract_audio:{task_id}".encode())
+        ],
+        [
+            Button.inline("Fix Playback Lag", data=f"ai_quick:lag:{task_id}".encode()),
             Button.inline("Shrink 4K to 1080p", data=f"ai_quick:1080:{task_id}".encode())
         ],
         [
-            Button.inline("Change to 9:16 (Vertical)", data=f"ai_quick:916:{task_id}".encode()),
-            Button.inline("Reverse Video", data=f"ai_quick:rev:{task_id}".encode())
+            Button.inline("Convert 9:16 Vertical", data=f"ai_quick:916:{task_id}".encode()),
+            Button.inline("Reverse Playback", data=f"ai_quick:rev:{task_id}".encode())
         ],
         [
             Button.inline("< Exit AI Mode (Back to Menu)", data=f"main_menu:{task_id}".encode())

@@ -37,6 +37,40 @@ class TaskContext:
     ai_agent: Optional[Any] = None
     ai_workplace_dir: Optional[Path] = None
     ai_last_action_plan: Optional[Dict[str, Any]] = None
+    assets: Optional[Dict[str, Any]] = None
+    processing_elapsed_time: float = 0.0
+
+    def get_assets(self) -> Dict[str, Any]:
+        """Returns registered session assets, initializing v1 from input_path if needed."""
+        if self.assets is None:
+            self.assets = {}
+        if "v1" not in self.assets and self.input_path:
+            self.assets["v1"] = {
+                "id": "v1",
+                "filename": self.input_path.name,
+                "filepath": self.input_path,
+                "media_type": "video" if (self.meta and self.meta.has_video) else "media",
+                "meta": self.meta
+            }
+        return self.assets
+
+    def add_asset(self, filepath: Path, meta: Optional[MediaMetadata] = None, media_type: str = "media") -> str:
+        """Registers a newly uploaded asset and returns its alias key (e.g. 'a1', 'v2')."""
+        assets = self.get_assets()
+        prefix = "a" if media_type == "audio" else "v"
+        idx = 1
+        key = f"{prefix}{idx}"
+        while key in assets:
+            idx += 1
+            key = f"{prefix}{idx}"
+        assets[key] = {
+            "id": key,
+            "filename": filepath.name,
+            "filepath": filepath,
+            "media_type": media_type,
+            "meta": meta
+        }
+        return key
 
 
 @dataclass

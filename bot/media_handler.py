@@ -58,6 +58,29 @@ def is_video_message(message) -> bool:
     return False
 
 
+def is_audio_message(message) -> bool:
+    """Checks if message contains an audio or voice recording."""
+    if getattr(message, "audio", None) or getattr(message, "voice", None):
+        return True
+    doc = getattr(message, "document", None)
+    if doc:
+        mime = getattr(doc, "mime_type", "") or ""
+        if isinstance(mime, str) and mime.startswith("audio/"):
+            return True
+        exts = [".mp3", ".aac", ".m4a", ".wav", ".flac", ".ogg", ".opus", ".wma"]
+        file_obj = getattr(message, "file", None)
+        name = getattr(file_obj, "name", "") or ""
+        if isinstance(name, str) and any(name.lower().endswith(ext) for ext in exts):
+            return True
+        attrs = getattr(doc, "attributes", None)
+        if attrs and isinstance(attrs, (list, tuple)):
+            from telethon.tl.types import DocumentAttributeAudio
+            for attr in attrs:
+                if isinstance(attr, DocumentAttributeAudio):
+                    return True
+    return False
+
+
 async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
     """Processes newly received video or document."""
     message = event.message
@@ -212,3 +235,48 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
             await status_msg.edit(f"[ERROR] **Failed to download or analyze video:**\n`{str(e)}`")
         except Exception:
             pass
+
+
+async def handle_incoming_session_asset(event: events.NewMessage.Event, task_ctx: TaskContext, client) -> None:
+    """Attaches a newly uploaded audio or secondary video file to an active AI Manual session."""
+    message = event.message
+    is_audio = is_audio_message(message)
+    media_type = "audio" if is_audio else "video"
+
+    file_name = getattr(message.file, "name", None) or (f"asset_{uuid.uuid4().hex[:6]}.mp3" if is_audio else f"asset_{uuid.uuid4().hex[:6]}.mp4")
+    clean_name = "".join(c for c in file_name if c.isalnum() or c in (".", "_", "-")).strip()
+    save_path = settings.DOWNLOAD_DIR / f"{task_ctx.task_id}_{clean_name}"
+
+    status_msg = await event.reply(f"**Adding new {media_type} to active AI session...**\n`{clean_name}`")
+
+    try:
+        await fast_download(
+            client=client,
+            message=message,
+            target_path=save_path
+        )
+        meta = await probe_media(save_path)
+        asset_key = task_ctx.add_asset(save_path, meta=meta, media_type=media_type)
+
+        assets = task_ctx.get_assets()
+        asset_lines = []
+        for k, a in assets.items():
+            m = a.get("meta")
+            spec = f"{m.resolution_label} | " if (m and m.has_video) else ""
+            dur = f"{int(m.duration_seconds)}s" if m else ""
+            asset_lines.append(f"• `[{k}]` **{a['filename']}** ({spec}{dur})")
+
+        reply_text = (
+            f"**New Asset Added to AI Session:** `[{asset_key}] {clean_name}`\n\n"
+            "**Current Session Assets:**\n" +
+            "\n".join(asset_lines) +
+            "\n\n**What would you like me to do?**\n"
+            "You can type your request, for example:\n"
+            "- *\"Replace the audio of [v1] with [a1]\"*\n"
+            "- *\"Extract audio from [v1] as MP3\"*\n"
+            "- *\"Mute [v1] and keep original quality\"*"
+        )
+        await status_msg.edit(reply_text)
+    except Exception as e:
+        logger.error(f"Failed to add asset to session: {e}", exc_info=True)
+        await status_msg.edit(f"**Failed to add {media_type} to AI session:** `{str(e)}`")
