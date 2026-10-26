@@ -774,3 +774,158 @@ async def test_safe_tool_executor_resolution_and_quality_guardrails(tmp_path):
         vf_idx2 = captured_cmds[1].index("-vf")
         assert "480" not in captured_cmds[1][vf_idx2 + 1]
         assert "1080" in captured_cmds[1][vf_idx2 + 1]
+
+
+def test_sanitize_message_history():
+    """Verifies that history sanitization complies with OpenAI / OpenRouter tool call requirements."""
+    from core.ai.agent import sanitize_message_history
+
+    # 1. Normal conversation
+    h1 = [{"role": "user", "content": "hi"}, {"role": "assistant", "content": "hello"}]
+    assert sanitize_message_history(h1) == h1
+
+    # 2. Tool response immediately followed by user message -> must insert assistant message
+    h2 = [
+        {"role": "user", "content": "optimize this"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}]},
+        {"role": "tool", "tool_call_id": "c1", "content": '{"status": "success"}'},
+        {"role": "user", "content": "now add audio"}
+    ]
+    s2 = sanitize_message_history(h2)
+    assert len(s2) == 5
+    assert s2[2]["role"] == "tool"
+    assert s2[3]["role"] == "assistant"
+    assert s2[4]["role"] == "user"
+
+    # 3. Trailing tool message -> must append assistant message
+    h3 = [
+        {"role": "user", "content": "optimize this"},
+        {"role": "assistant", "content": None, "tool_calls": [{"id": "c1"}]},
+        {"role": "tool", "tool_call_id": "c1", "content": '{"status": "success"}'}
+    ]
+    s3 = sanitize_message_history(h3)
+    assert len(s3) == 4
+    assert s3[-1]["role"] == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_deliver_ai_results_registers_assets_and_updates_context(tmp_path):
+    """Verifies that deliver_ai_results registers output files as session assets and updates task_ctx.meta."""
+    from bot.ai_handler import deliver_ai_results
+    from bot.task_manager import TaskContext
+
+    in_file = tmp_path / "original_4k.mp4"
+    in_file.write_bytes(b"orig_4k_data")
+    out_file = tmp_path / "optimized_muted.mp4"
+    out_file.write_bytes(b"opt_muted_data")
+
+    orig_meta = make_dummy_metadata(file_path=in_file, file_name="original_4k.mp4", file_size_bytes=1000, duration_seconds=11.0, has_video=True)
+    out_meta = make_dummy_metadata(file_path=out_file, file_name="optimized_muted.mp4", file_size_bytes=500, duration_seconds=11.0, has_video=True)
+
+    status_msg = AsyncMock()
+    mock_client = AsyncMock()
+
+    task_ctx = TaskContext(
+        task_id="chain_task",
+        user_id=777,
+        input_path=in_file,
+        output_path=None,
+        meta=orig_meta,
+        status_message=status_msg,
+        original_message_id=50
+    )
+    task_ctx.ai_session_active = True
+
+    # Initialize agent
+    mock_ai_agent = MagicMock()
+    mock_ai_agent.assets = task_ctx.get_assets()
+    mock_ai_agent.tool_executor = MagicMock()
+    task_ctx.ai_agent = mock_ai_agent
+
+    with patch("bot.ai_handler.fast_upload", AsyncMock(return_value="doc_out")), \
+         patch("bot.ai_handler.probe_media", AsyncMock(return_value=out_meta)), \
+         patch("bot.ai_handler.register_file_cache", AsyncMock()), \
+         patch("bot.ai_handler.record_task_complete", AsyncMock()):
+
+        await deliver_ai_results(
+            task_ctx=task_ctx,
+            plan_title="Optimize and Mute",
+            out_paths=[out_file],
+            status_msg=status_msg,
+            client=mock_client,
+            assistant_text="I have optimized and muted your video. Please upload your new soundtrack!"
+        )
+
+        # 1. Output deliverable registered in assets
+        assert "v2" in task_ctx.assets
+        assert task_ctx.assets["v2"]["filename"] == "optimized_muted.mp4"
+
+        # 2. Context updated to output deliverable
+        assert task_ctx.input_path == out_file
+        assert task_ctx.meta == out_meta
+
+        # 3. Agent synchronized with output context
+        assert task_ctx.ai_agent.input_path == out_file
+        assert task_ctx.ai_agent.meta == out_meta
+
+        # 4. Assistant message displayed in summary card
+        status_edit_text = status_msg.edit.call_args[0][0]
+        assert "Please upload your new soundtrack!" in status_edit_text
+        assert "Preserved for chained edits" in status_edit_text
+
+
+@pytest.mark.asyncio
+async def test_safe_tool_executor_dual_input_auto_mapping_and_stream_copy(sample_metadata, tmp_path):
+    """Verifies that combining video and audio inputs automatically configures -map and stream copy."""
+    vid_file = tmp_path / "video_muted.mp4"
+    vid_file.write_bytes(b"vid_bytes")
+    aud_file = tmp_path / "new_audio.mp3"
+    aud_file.write_bytes(b"aud_bytes")
+
+    vid_meta = make_dummy_metadata(file_path=vid_file, file_name="video_muted.mp4", file_size_bytes=1000, has_video=True)
+    aud_meta = make_dummy_metadata(file_path=aud_file, file_name="new_audio.mp3", file_size_bytes=200, has_video=False)
+
+    assets = {
+        "v2": {"id": "v2", "filename": "video_muted.mp4", "filepath": vid_file, "meta": vid_meta, "media_type": "video"},
+        "a1": {"id": "a1", "filename": "new_audio.mp3", "filepath": aud_file, "meta": aud_meta, "media_type": "audio"}
+    }
+
+    executor = SafeToolExecutor(
+        user_id=111,
+        task_id="dual_in_task",
+        input_path=vid_file,
+        meta=vid_meta,
+        assets=assets
+    )
+
+    captured_cmds = []
+    async def mock_run_ffmpeg(cmd, total_duration_seconds, progress_callback=None, on_process_started=None):
+        captured_cmds.append(cmd)
+        out_p = Path(cmd[-1])
+        out_p.write_bytes(b"merged_out")
+
+    async def mock_probe(p):
+        return vid_meta if "video" in str(p) else aud_meta
+
+    with patch("core.ai.tools.run_ffmpeg_with_progress", side_effect=mock_run_ffmpeg), \
+         patch("core.ai.tools.probe_media", side_effect=mock_probe):
+
+        res = await executor.run_execute_ffmpeg(
+            plan_title="Merge Video and New Audio",
+            output_filename="final_video.mp4",
+            inputs=["v2", "a1"]
+        )
+
+        assert res["status"] == "success"
+        cmd = captured_cmds[0]
+        # Must map video from 0 and audio from 1
+        assert "-map" in cmd
+        map_indices = [i for i, x in enumerate(cmd) if x == "-map"]
+        assert cmd[map_indices[0] + 1] == "0:v:0"
+        assert cmd[map_indices[1] + 1] == "1:a:0"
+        # Must use video stream copy because video is already encoded
+        cv_idx = cmd.index("-c:v")
+        assert cmd[cv_idx + 1] == "copy"
+        # Must include -shortest
+        assert "-shortest" in cmd
+

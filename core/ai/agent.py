@@ -18,6 +18,49 @@ from core.ai.tools import AI_TOOLS_SCHEMA, SafeToolExecutor
 logger = logging.getLogger(__name__)
 
 
+def sanitize_message_history(history: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Sanitizes message history for OpenAI / OpenRouter Chat Completion API compliance.
+    Ensures that every 'tool' message sequence is properly opened by an 'assistant' message
+    with 'tool_calls' and properly closed by an 'assistant' response before any subsequent 'user' message.
+    """
+    if not history:
+        return []
+
+    sanitized: List[Dict[str, Any]] = []
+    in_tool_sequence = False
+
+    for msg in history:
+        role = msg.get("role")
+
+        if role == "tool":
+            sanitized.append(msg)
+            in_tool_sequence = True
+        elif role == "user":
+            if in_tool_sequence:
+                # Close the tool sequence with a synthetic assistant message before user message
+                sanitized.append({
+                    "role": "assistant",
+                    "content": "Operation completed."
+                })
+                in_tool_sequence = False
+            sanitized.append(msg)
+        elif role == "assistant":
+            in_tool_sequence = False
+            sanitized.append(msg)
+        else:
+            in_tool_sequence = False
+            sanitized.append(msg)
+
+    if in_tool_sequence:
+        sanitized.append({
+            "role": "assistant",
+            "content": "Operation completed."
+        })
+
+    return sanitized
+
+
 class VideoAIAgent:
     """Autonomous Video Optimization & Diagnostic Agent."""
 
@@ -110,11 +153,16 @@ class VideoAIAgent:
             "     * If the user ALSO asked to optimize or mute right now: Call `execute_ffmpeg_plan` with mute_video_only=True (audio_codec='none') and 1080p scale to deliver the optimized muted video immediately, AND in your conversational response tell the user: 'I have optimized your video to 1080p without losing quality and removed the existing audio. Please upload or forward the new audio file you want to add, and I will merge it with this video!'\n"
             "     * OR reply in plain English: 'I can optimize the video to 1080p and replace the audio. Please drop or forward the audio file you want to add into this chat now, and I will remove the original audio and merge your new soundtrack!'\n"
             "   - Always clearly prompt the user to drop the file they want to add.\n"
-            "4. **Multi-Asset Referencing:** Reference session assets by their keys (e.g. 'v1', 'a1') in the inputs list.\n"
-            "5. **Memory Safety on Snapdragon / Low RAM:** NEVER buffer unbounded frames into RAM. If user asks to reverse a video "
+            "4. **Post-Execution Logical Response:**\n"
+            "   - When reviewing tool execution results, formulate a logical assistant response:\n"
+            "     * If the overall user goal was only partially completed because it requires additional input from the user (such as sending a new audio track or another clip), DO NOT ask if they are satisfied. Instead, clearly prompt them for the required missing file or next step.\n"
+            "     * If the requested operation is fully completed, ask what they would like to do next with this file or if they got the expected result.\n"
+            "5. **Multi-Asset Referencing & Deliverable Chaining:**\n"
+            "   - When deliverables are generated, they are registered as session assets (e.g. [v2], [a1]). Use the latest processed deliverable as the primary input when performing follow-up tasks on it unless the user specifies otherwise.\n"
+            "6. **Memory Safety on Snapdragon / Low RAM:** NEVER buffer unbounded frames into RAM. If user asks to reverse a video "
             "> 30s or > 720p, inform them or downscale to 720p.\n"
-            "6. **No Emojis:** Do NOT include any emojis or emoji symbols in your responses. Output only plain, professional text.\n"
-            "7. **New Asset Uploaded:** If the user provides a new asset (e.g. [a1]) following a previous discussion or request to merge/replace/add audio or video, immediately call `execute_ffmpeg_plan` to perform the operation."
+            "7. **No Emojis:** Do NOT include any emojis or emoji symbols in your responses. Output only plain, professional text.\n"
+            "8. **New Asset Uploaded:** If the user provides a new asset (e.g. [a1]) following a previous discussion or request to merge/replace/add audio or video, immediately call `execute_ffmpeg_plan` using the latest video asset (e.g. [v2] or [v1]) and the new audio asset (e.g. [a1]) to perform the merge/replacement."
         )
 
     async def process_message(
@@ -130,9 +178,10 @@ class VideoAIAgent:
         # Append user message
         self.history.append({"role": "user", "content": user_text})
 
-        # Build payload with dynamic system prompt
+        # Build payload with dynamic system prompt and sanitized history
         system_prompt = self._build_system_prompt(user_text)
-        messages = [{"role": "system", "content": system_prompt}] + self.history[-8:]  # keep recent 8 turns
+        sanitized_history = sanitize_message_history(self.history)
+        messages = [{"role": "system", "content": system_prompt}] + sanitized_history[-8:]
 
         try:
             assistant_msg = await self.client.chat_completion(
@@ -241,5 +290,25 @@ class VideoAIAgent:
 
         # Primary tool result
         primary_result = execution_results[0] if execution_results else {"status": "success", "type": "none"}
-        primary_result["assistant_text"] = content
+
+        # Follow-up completion turn so the model evaluates tool results and produces assistant response
+        try:
+            follow_up_messages = [{"role": "system", "content": self._build_system_prompt(user_text)}] + sanitize_message_history(self.history)[-8:]
+            follow_up_msg = await self.client.chat_completion(
+                messages=follow_up_messages,
+                tools=AI_TOOLS_SCHEMA,
+                preferred_model=self.preferred_model
+            )
+            follow_up_content = follow_up_msg.get("content") or ""
+            self.history.append({"role": "assistant", "content": follow_up_content})
+            primary_result["assistant_text"] = follow_up_content
+        except Exception as follow_up_err:
+            logger.warning(f"Error in follow-up AI completion: {follow_up_err}")
+            fallback_text = (
+                f"I have executed the operation: {primary_result.get('plan_title', 'video processing')}. "
+                "What would you like to do next with this file?"
+            )
+            self.history.append({"role": "assistant", "content": fallback_text})
+            primary_result["assistant_text"] = fallback_text
+
         return primary_result

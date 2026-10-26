@@ -131,7 +131,9 @@ async def handle_ai_user_text(event, task_ctx, client) -> None:
             pass
         return
 
-    status_msg = task_ctx.status_message or await event.respond("**AI Engineer Thinking...**")
+    # Always reply directly below the user's message so the conversation stays linear and visible
+    status_msg = await event.reply("**AI Video Engineer is thinking...**")
+    task_ctx.status_message = status_msg
     await execute_ai_query(user_text, task_ctx, status_msg, client)
 
 
@@ -147,7 +149,7 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
     # Display initial thinking status
     try:
         await status_msg.edit(
-            f"**AI Engineer is analyzing your request...**\n\n_\"{user_prompt[:80]}...\"_",
+            f"**AI Video Engineer is analyzing your request...**\n\n_\"{user_prompt[:80]}...\"_",
             buttons=None
         )
     except Exception:
@@ -167,6 +169,10 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
     else:
         task_ctx.ai_agent.assets = task_ctx.get_assets()
         task_ctx.ai_agent.tool_executor.assets = task_ctx.get_assets()
+        task_ctx.ai_agent.input_path = task_ctx.input_path
+        task_ctx.ai_agent.meta = task_ctx.meta
+        task_ctx.ai_agent.tool_executor.input_path = task_ctx.input_path
+        task_ctx.ai_agent.tool_executor.meta = task_ctx.meta
 
     updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
 
@@ -183,7 +189,7 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
         text = (
             f"**AI Transcoding in Progress...**\n\n"
             f"{step_line}"
-            f"• **Progress:** {bar} `{percent:.1f}%`\n"
+            f"• **Progress:** {bar}\n"
             f"• **Speed:** `{speed}` | **FPS:** `{fps:.1f}`\n"
             f"• **ETA:** `{eta}s`\n"
             f"• **Engine:** `{current_hardware.description}`\n"
@@ -323,7 +329,7 @@ async def run_and_deliver_ai_plan(task_ctx, plan: Dict[str, Any], status_msg, cl
             bar = make_progress_bar(percent)
             text = (
                 f"**AI Transcoding: {plan.get('plan_title')}**\n\n"
-                f"• **Progress:** {bar} `{percent:.1f}%`\n"
+                f"• **Progress:** {bar}\n"
                 f"• **Speed:** `{speed}` | **FPS:** `{fps:.1f}`\n"
                 f"• **ETA:** `{eta}s`\n"
                 f"• **Engine:** `{current_hardware.description}`\n"
@@ -406,6 +412,8 @@ async def deliver_ai_results(
     task_ctx.active_stage_label = f"Uploading AI Results ({total_deliverables} files)"
     updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
     total_output_size = 0
+    latest_video_path: Optional[Path] = None
+    latest_video_meta: Optional[MediaMetadata] = None
 
     for idx, out_path in enumerate(valid_paths, start=1):
         if task_ctx.is_cancelled:
@@ -451,7 +459,7 @@ async def deliver_ai_results(
                 f"**Uploading Deliverables ({idx}/{total_deliverables})**\n\n"
                 f"• **Plan:** `{plan_title}`\n"
                 f"• **File:** `{disp_name}`\n"
-                f"• **Progress:** {bar} `{percent:.1f}%`\n"
+                f"• **Progress:** {bar}\n"
                 f"• **Uploaded:** `{cur_mb:.1f} MB / {tot_mb:.1f} MB`\n"
                 f"• **Speed:** `{speed_mb:.1f} MB/s` | **ETA:** `{eta}s`"
             )
@@ -475,6 +483,13 @@ async def deliver_ai_results(
         out_meta = await probe_media(out_path)
         file_size = out_path.stat().st_size
         total_output_size += file_size
+
+        # Register this deliverable into session assets so AI has full context of outputs
+        media_type = "video" if (out_meta and out_meta.has_video) else "audio"
+        task_ctx.add_asset(out_path, meta=out_meta, media_type=media_type)
+        if out_meta and out_meta.has_video:
+            latest_video_path = out_path
+            latest_video_meta = out_meta
 
         if out_meta and out_meta.has_video:
             before_after = format_before_after_analysis(meta, out_meta)
@@ -504,30 +519,33 @@ async def deliver_ai_results(
             supports_streaming=supports_streaming
         )
 
+    # Update primary session context to the latest produced video deliverable
+    if latest_video_path and latest_video_meta:
+        task_ctx.input_path = latest_video_path
+        task_ctx.meta = latest_video_meta
+
+    if task_ctx.ai_agent:
+        task_ctx.ai_agent.assets = task_ctx.get_assets()
+        task_ctx.ai_agent.tool_executor.assets = task_ctx.get_assets()
+        if latest_video_path and latest_video_meta:
+            task_ctx.ai_agent.input_path = latest_video_path
+            task_ctx.ai_agent.meta = latest_video_meta
+            task_ctx.ai_agent.tool_executor.input_path = latest_video_path
+            task_ctx.ai_agent.tool_executor.meta = latest_video_meta
+
     # Record complete in DB
     elapsed_time = getattr(task_ctx, "processing_elapsed_time", 1.0)
     await record_task_complete(task_id, output_size=total_output_size, elapsed_time=elapsed_time)
 
-    # Schedule automatic deletion of sandbox files after 2 minutes (120 seconds)
-    async def _delayed_workplace_cleanup(u_id: int, t_id: str, delay_sec: int = 120):
-        await asyncio.sleep(delay_sec)
-        try:
-            settings.clean_ai_workplace(u_id, t_id)
-            logger.info(f"Auto-cleaned AI workplace sandbox for user {u_id}, task {t_id} after {delay_sec}s")
-        except Exception as cleanup_err:
-            logger.warning(f"Error during delayed workplace cleanup: {cleanup_err}")
-
-    asyncio.create_task(_delayed_workplace_cleanup(user_id, task_id, delay_sec=120))
-
     # Keep AI session active and display clean summary card
     file_plural = "Deliverable" if total_deliverables == 1 else "Deliverables"
     target_name = clean_display_name(task_ctx.meta.file_name)
-    note_line = f"\n• **Note:** {assistant_text}\n" if (assistant_text and len(assistant_text.strip()) > 0) else ""
+    note_line = f"\n• **AI Video Engineer:**\n{assistant_text}\n" if (assistant_text and len(assistant_text.strip()) > 0) else ""
     summary_card = (
         f"**{file_plural} Delivered Successfully ({total_deliverables} files)**\n\n"
         f"• **Plan Applied:** `{plan_title}`\n"
         f"• **Session Target:** `{target_name}`\n"
-        f"• **Auto-Cleanup:** Sandbox files will be automatically deleted in 2 minutes.\n"
+        f"• **Sandbox Storage:** Preserved for chained edits.\n"
         f"{note_line}\n"
         "AI Video Engineer is still active. You can type another instruction, request further changes, or send new media assets."
     )

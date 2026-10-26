@@ -352,13 +352,27 @@ class SafeToolExecutor:
                             cmd.extend(parts)
                     elif isinstance(m, list):
                         cmd.extend(m)
+            elif len(resolved_inputs) == 2:
+                # Auto stream mapping when combining 2 inputs (e.g. video + audio)
+                try:
+                    p0_meta = await probe_media(resolved_inputs[0])
+                    p1_meta = await probe_media(resolved_inputs[1])
+                    if p0_meta and p0_meta.has_video and p1_meta and p1_meta.has_audio:
+                        cmd.extend(["-map", "0:v:0", "-map", "1:a:0"])
+                    elif p1_meta and p1_meta.has_video and p0_meta and p0_meta.has_audio:
+                        cmd.extend(["-map", "1:v:0", "-map", "0:a:0"])
+                except Exception:
+                    pass
 
             # Video Stream Handling
             if op_extract_audio:
                 cmd.append("-vn")
             else:
                 vcodec = op.get("video_codec", "libx264")
-                if op_mute_video and vcodec == "libx264" and (not op_vf or not op_vf.strip()):
+                if len(resolved_inputs) == 2 and not (op_vf and op_vf.strip()):
+                    # When combining new audio into an already-encoded video without extra filters, stream copy video
+                    vcodec = "copy"
+                elif op_mute_video and vcodec == "libx264" and (not op_vf or not op_vf.strip()):
                     vcodec = "copy"
                 if op_vf and op_vf.strip():
                     cmd.extend(["-vf", op_vf.strip()])
@@ -390,10 +404,16 @@ class SafeToolExecutor:
                     cmd.extend(["-c:a", "libmp3lame", "-b:a", "192k"])
 
             # Extra safe arguments (e.g. -shortest, -ss, -to)
+            has_shortest = False
             if op.get("extra_args"):
                 for ea in op["extra_args"]:
                     if isinstance(ea, str):
                         cmd.extend(ea.split())
+                        if "-shortest" in ea:
+                            has_shortest = True
+
+            if len(resolved_inputs) >= 2 and not has_shortest and not op_extract_audio:
+                cmd.append("-shortest")
 
             # Faststart for web streaming containers
             if safe_filename.endswith((".mp4", ".mov", ".m4v", ".m4a")):

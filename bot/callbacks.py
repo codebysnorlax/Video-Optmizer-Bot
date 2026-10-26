@@ -371,6 +371,10 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             await event.answer("Session expired or file was deleted.", alert=True)
             return
         task_ctx.ai_session_active = False
+        try:
+            settings.clean_ai_workplace(task_ctx.user_id, task_id)
+        except Exception as e:
+            logger.warning(f"Error cleaning workplace on main_menu exit: {e}")
         menu = build_main_menu(task_id)
         summary = task_ctx.meta.get_summary_card(current_hardware.description)
         await event.edit(summary, buttons=menu)
