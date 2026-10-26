@@ -22,6 +22,8 @@ storage/downloads/*
 !storage/downloads/.gitkeep
 storage/outputs/*
 !storage/outputs/.gitkeep
+storage/Ai_Workplace/*
+!storage/Ai_Workplace/.gitkeep
 
 # Environment variables
 .env

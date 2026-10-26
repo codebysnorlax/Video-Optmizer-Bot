@@ -23,7 +23,17 @@ def build_ai_session_menu(task_id: str) -> List[List[Button]]:
     """Builds clean controls for AI Manual mode allowing freeform conversational chat."""
     return [
         [
-            Button.inline("< Exit AI Mode (Back to Menu)", data=f"main_menu:{task_id}".encode())
+            Button.inline("Done (Exit AI Mode)", data=f"main_menu:{task_id}".encode())
+        ]
+    ]
+
+
+def build_ai_deliver_menu(task_id: str) -> List[List[Button]]:
+    """Builds two options after deliverable delivery: continue editing or done."""
+    return [
+        [
+            Button.inline("Try Another Edit / Request", data=f"ai_manual:{task_id}".encode()),
+            Button.inline("Done (Exit AI Mode)", data=f"main_menu:{task_id}".encode())
         ]
     ]
 

@@ -16,13 +16,15 @@ from core.hardware import current_hardware
 from core.terminal import term_log
 from core.engine import run_ffmpeg_with_progress
 from core.fast_transfer import fast_upload
+from core.optimizer import VideoOptimizer
 from core.ai.agent import VideoAIAgent
 from bot.keyboards import (
     build_main_menu,
     build_ai_session_menu,
     build_ai_fix_menu,
     build_cleanup_original_menu,
-    build_task_progress_menu
+    build_task_progress_menu,
+    build_ai_deliver_menu
 )
 from bot.progress import (
     ThrottledMessageUpdater,
@@ -128,12 +130,6 @@ async def handle_ai_user_text(event, task_ctx, client) -> None:
         except Exception:
             pass
         return
-
-    # Delete incoming user message for cleaner chat interface if possible
-    try:
-        await event.delete()
-    except Exception:
-        pass
 
     status_msg = task_ctx.status_message or await event.respond("**AI Engineer Thinking...**")
     await execute_ai_query(user_text, task_ctx, status_msg, client)
@@ -259,7 +255,8 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
             out_paths,
             status_msg,
             client,
-            deliverables=result.get("deliverables")
+            deliverables=result.get("deliverables"),
+            assistant_text=result.get("assistant_text")
         ))
         return
 
@@ -272,9 +269,10 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
 
 async def handle_ai_apply_fix(event, task_ctx, client) -> None:
     """Applies the recommended fix generated during diagnosis."""
+    scale_filter = VideoOptimizer.get_optimal_scale_filter(task_ctx.meta, 1080) if task_ctx.meta else None
     plan = task_ctx.ai_last_action_plan or {
         "plan_title": "AI Recommended Fix",
-        "vf_filter": "scale=-2:1080" if (task_ctx.meta and (task_ctx.meta.width or 0) > 1920) else None,
+        "vf_filter": scale_filter,
         "video_codec": "libx264",
         "crf": 22,
         "audio_codec": "aac",
@@ -384,7 +382,8 @@ async def deliver_ai_results(
     out_paths: List[Path],
     status_msg,
     client,
-    deliverables: Optional[List[Dict[str, Any]]] = None
+    deliverables: Optional[List[Dict[str, Any]]] = None,
+    assistant_text: Optional[str] = None
 ) -> None:
     """Uploads multiple completed AI deliverables sequentially with progress reporting and cleanup prompt."""
     task_id = task_ctx.task_id
@@ -523,14 +522,16 @@ async def deliver_ai_results(
     # Keep AI session active and display clean summary card
     file_plural = "Deliverable" if total_deliverables == 1 else "Deliverables"
     target_name = clean_display_name(task_ctx.meta.file_name)
+    note_line = f"\n• **Note:** {assistant_text}\n" if (assistant_text and len(assistant_text.strip()) > 0) else ""
     summary_card = (
         f"**{file_plural} Delivered Successfully ({total_deliverables} files)**\n\n"
         f"• **Plan Applied:** `{plan_title}`\n"
         f"• **Session Target:** `{target_name}`\n"
-        f"• **Auto-Cleanup:** Sandbox files will be automatically deleted in 2 minutes.\n\n"
+        f"• **Auto-Cleanup:** Sandbox files will be automatically deleted in 2 minutes.\n"
+        f"{note_line}\n"
         "AI Video Engineer is still active. You can type another instruction, request further changes, or send new media assets."
     )
-    await status_msg.edit(summary_card, buttons=build_ai_session_menu(task_id))
+    await status_msg.edit(summary_card, buttons=build_ai_deliver_menu(task_id))
     task_ctx.is_processing = False
     task_ctx.ai_session_active = True
 

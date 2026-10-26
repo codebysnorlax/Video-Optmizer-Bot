@@ -26,7 +26,7 @@ AI_TOOLS_SCHEMA: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "diagnose_video",
-            "description": "Provide a technical yet easy-to-understand explanation of why the video lags, stutters, has huge file size bloat, or fails on mobile devices, and recommend a concrete fix.",
+            "description": "Provide a technical explanation ONLY when user asks a pure informational question (e.g. 'Why does this lag?', 'Why is this file size so big?'). NEVER call this tool if user asks to 'optimize', 'fix', 'remove audio', 'mute', 'convert', 'add audio', or perform any editing action. For any editing or optimization request, call execute_ffmpeg_plan or prompt the user directly.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -313,6 +313,28 @@ class SafeToolExecutor:
                     return {"status": "error", "error": f"Memory Safety Constraint: {warn}"}
                 if "downscaling to 720p" in warn and "scale" not in (op_vf or ""):
                     op_vf = f"scale=-2:720,{op_vf}" if op_vf else "scale=-2:720,reverse"
+
+            # Orientation-Aware Scaling & Quality Floor Protection
+            if op_vf and self.meta and self.meta.width and self.meta.height:
+                is_portrait = self.meta.width < self.meta.height
+                src_w, src_h = self.meta.width, self.meta.height
+                explicit_low_res = any(kw in plan_title.lower() for kw in ("480", "360", "sd", "lowest"))
+
+                # 1. Correct inverted portrait scale (e.g. scale=-2:1080 -> scale=1080:-2)
+                if is_portrait and "scale=-2:1080" in op_vf:
+                    op_vf = op_vf.replace("scale=-2:1080", "scale=1080:-2")
+
+                # 2. Prevent accidental / hallucinated downscaling to 480p or 360p unless explicitly requested
+                if not explicit_low_res and ("480" in op_vf or "360" in op_vf):
+                    import re
+                    # If source exceeds 1080p, cap at 1080p; otherwise keep native (remove downscale)
+                    if max(src_w, src_h) > 1080 and min(src_w, src_h) > 1080:
+                        safe_scale = "scale=1080:-2" if is_portrait else "scale=-2:1080"
+                    else:
+                        safe_scale = ""
+                    op_vf = re.sub(r'scale=[^,:]+:(?:480|360)', safe_scale, op_vf)
+                    op_vf = re.sub(r'scale=(?:480|360):[^,:]+', safe_scale, op_vf)
+                    op_vf = re.sub(r',+', ',', op_vf).strip(",").strip()
 
             # Assemble FFmpeg Command
             cmd = []

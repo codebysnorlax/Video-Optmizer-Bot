@@ -186,6 +186,12 @@ def test_bot_ai_keyboards():
     fix_menu = build_ai_fix_menu("t1", "recommended")
     assert b"ai_apply:recommended:t1" in fix_menu[0][0].type.data
 
+    from bot.keyboards import build_ai_deliver_menu
+    deliv_menu = build_ai_deliver_menu("t1")
+    assert len(deliv_menu[0]) == 2
+    assert b"ai_manual:t1" in deliv_menu[0][0].type.data
+    assert b"main_menu:t1" in deliv_menu[0][1].type.data
+
 
 def test_task_manager_ai_session_lookup():
     """Verifies that TaskManager tracks and finds active AI sessions by user_id."""
@@ -695,3 +701,76 @@ def test_zero_emojis_in_all_ai_strings():
         for btn in row:
             for em in emoji_chars:
                 assert em not in btn.text, f"Emoji '{em}' found in fix button: {btn.text}"
+
+    from bot.keyboards import build_ai_deliver_menu
+    deliv_menu = build_ai_deliver_menu("test_task")
+    for row in deliv_menu:
+        for btn in row:
+            for em in emoji_chars:
+                assert em not in btn.text, f"Emoji '{em}' found in deliver button: {btn.text}"
+
+
+@pytest.mark.asyncio
+async def test_safe_tool_executor_resolution_and_quality_guardrails(tmp_path):
+    """Verifies that portrait 4K scale is oriented correctly (1080:-2) and 480p is prevented unless requested."""
+    input_file = tmp_path / "portrait_4k.mp4"
+    input_file.write_bytes(b"dummy")
+
+    meta_portrait_4k = MediaMetadata(
+        file_path=input_file,
+        file_name="portrait_4k.mp4",
+        file_size_bytes=8000000,
+        duration_seconds=10.0,
+        container_format="mp4",
+        has_video=True,
+        video_codec="hevc",
+        width=2160,
+        height=3840,
+        fps=60.0,
+        video_bitrate_kbps=5800,
+        has_audio=True,
+        audio_codec="aac",
+        audio_channels=2,
+        audio_sample_rate=48000,
+        audio_bitrate_kbps=128,
+        overall_bitrate_kbps=5928,
+        is_high_bitrate=False,
+        raw_info={}
+    )
+
+    executor = SafeToolExecutor(
+        user_id=9999,
+        task_id="t_res_guard",
+        input_path=input_file,
+        meta=meta_portrait_4k
+    )
+
+    captured_cmds = []
+    async def mock_run_ffmpeg(cmd, total_duration_seconds, progress_callback=None, on_process_started=None):
+        captured_cmds.append(cmd)
+        out_p = Path(cmd[-1])
+        out_p.write_bytes(b"dummy_out")
+
+    with patch("core.ai.tools.run_ffmpeg_with_progress", side_effect=mock_run_ffmpeg), \
+         patch("core.ai.tools.probe_media", AsyncMock(return_value=meta_portrait_4k)):
+
+        # 1. Inverted portrait filter (scale=-2:1080) MUST be corrected to scale=1080:-2
+        await executor.run_execute_ffmpeg(
+            plan_title="Optimize 4K vertical",
+            output_filename="opt.mp4",
+            vf_filter="scale=-2:1080"
+        )
+        assert len(captured_cmds) == 1
+        vf_idx = captured_cmds[0].index("-vf")
+        assert captured_cmds[0][vf_idx + 1] == "scale=1080:-2"
+
+        # 2. Unauthorized 480p downscaling MUST be clamped to 1080p
+        await executor.run_execute_ffmpeg(
+            plan_title="Optimize without losing quality",
+            output_filename="opt2.mp4",
+            vf_filter="scale=480:854"
+        )
+        assert len(captured_cmds) == 2
+        vf_idx2 = captured_cmds[1].index("-vf")
+        assert "480" not in captured_cmds[1][vf_idx2 + 1]
+        assert "1080" in captured_cmds[1][vf_idx2 + 1]
