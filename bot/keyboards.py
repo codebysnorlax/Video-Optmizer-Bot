@@ -49,6 +49,39 @@ def build_ai_fix_menu(task_id: str, fix_action: str) -> List[List[Button]]:
     ]
 
 
+def build_ai_models_menu(models: list, current_model: str, page: int = 0, page_size: int = 5) -> List[List[Button]]:
+    """Builds interactive list of free OpenRouter models with pagination and selection."""
+    buttons = []
+    total_models = len(models)
+    start_idx = page * page_size
+    end_idx = min(start_idx + page_size, total_models)
+
+    for i in range(start_idx, end_idx):
+        m = models[i]
+        mid = m["id"]
+        name = m.get("name", mid)
+        if mid == current_model:
+            label = f"[Active] {name[:24]}"
+        else:
+            label = f"{name[:26]}"
+        buttons.append([Button.inline(label, data=f"aimod_idx:{i}:{page}".encode())])
+
+    # Pagination controls
+    nav_row = []
+    if page > 0:
+        nav_row.append(Button.inline("< Prev", data=f"aimod_page:{page - 1}".encode()))
+    if end_idx < total_models:
+        nav_row.append(Button.inline("Next >", data=f"aimod_page:{page + 1}".encode()))
+    if nav_row:
+        buttons.append(nav_row)
+
+    buttons.append([
+        Button.inline("Refresh Models", data=b"aimod_ref"),
+        Button.inline("< Dashboard", data=b"dash_home")
+    ])
+    return buttons
+
+
 def build_optimize_menu(task_id: str) -> List[List[Button]]:
     """Builds the 3 optimization sub-options menu."""
     return [

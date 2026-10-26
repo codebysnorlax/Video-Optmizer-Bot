@@ -67,6 +67,9 @@ async def build_start_dashboard(user_id: int, user_name: str) -> tuple[str, list
         [
             Button.inline("System Diagnostics", data=b"dash_hw"),
             Button.inline("Help & Guide", data=b"dash_help")
+        ],
+        [
+            Button.inline("AI Model Settings", data=b"aimod_page:0")
         ]
     ]
     return text, buttons
@@ -231,5 +234,26 @@ async def handle_files(event: events.NewMessage.Event) -> None:
         "Select any file below to **Recall** (send back to you) or **Delete** from server:"
     )
     menu = build_files_list_menu(files, page=0)
+    await event.respond(text, buttons=menu)
+    await _safe_delete_incoming_command(event)
+
+
+async def handle_ai_models(event: events.NewMessage.Event) -> None:
+    """Handles /model or /ai_settings command to view and select active AI model."""
+    from core.ai.client import fetch_openrouter_free_models
+    from database.models import get_user_ai_model
+    from bot.keyboards import build_ai_models_menu
+
+    user_id = event.sender_id
+    current_model = await get_user_ai_model(user_id)
+    models = await fetch_openrouter_free_models()
+
+    text = (
+        "**AI Model Settings**\n\n"
+        f"• **Active Model:** `{current_model}`\n"
+        f"• **Available Free Models:** `{len(models)} detected`\n\n"
+        "Select a free model from OpenRouter below to use for AI Manual tasks:"
+    )
+    menu = build_ai_models_menu(models, current_model, page=0)
     await event.respond(text, buttons=menu)
     await _safe_delete_incoming_command(event)

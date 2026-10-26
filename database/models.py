@@ -228,3 +228,32 @@ async def get_single_cached_file(user_id: int, task_id: str, file_type: str) -> 
         "size": os.path.getsize(path),
         "created_at": cache.get("created_at", "")
     }
+
+
+async def get_user_ai_model(user_id: int) -> str:
+    """Returns the user's selected AI model or global default."""
+    try:
+        async with aiosqlite.connect(settings.DB_PATH) as db:
+            async with db.execute("SELECT ai_model FROM user_preferences WHERE user_id = ?", (user_id,)) as cursor:
+                row = await cursor.fetchone()
+                if row and row[0]:
+                    return row[0]
+    except Exception as e:
+        logger.warning(f"Error reading user_preferences: {e}")
+    return settings.OPENROUTER_MODEL or "openrouter/free"
+
+
+async def set_user_ai_model(user_id: int, ai_model: str) -> None:
+    """Saves user's chosen AI model."""
+    try:
+        async with aiosqlite.connect(settings.DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO user_preferences (user_id, ai_model)
+                VALUES (?, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    ai_model = excluded.ai_model,
+                    updated_at = CURRENT_TIMESTAMP
+            """, (user_id, ai_model))
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"Error saving user_preferences: {e}")

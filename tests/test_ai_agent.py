@@ -217,3 +217,92 @@ def test_task_manager_ai_session_lookup():
     assert tm.get_active_ai_task_for_user(1001) is None
     assert tm.get_active_ai_task_for_user(1002) == ctx2
     assert tm.get_active_ai_task_for_user(9999) is None
+
+
+@pytest.mark.asyncio
+async def test_fetch_openrouter_free_models_filtering():
+    """Verifies free models fetcher filters out embeddings/rerankers and caches results."""
+    from core.ai.client import fetch_openrouter_free_models
+
+    mock_api_payload = {
+        "data": [
+            {"id": "nvidia/nemotron-3.5-embed-1b:free", "name": "Nemotron Embed 1B (free)", "pricing": {"prompt": "0", "completion": "0"}},
+            {"id": "nvidia/nemotron-3.5-rerank-8b:free", "name": "Nemotron Rerank 8B (free)", "pricing": {"prompt": "0", "completion": "0"}},
+            {"id": "openai/moderation:free", "name": "OpenAI Moderation (free)", "pricing": {"prompt": "0", "completion": "0"}},
+            {"id": "nvidia/nemotron-3.5-lightning:free", "name": "NVIDIA: Nemotron 3.5 Lightning (free)", "pricing": {"prompt": "0", "completion": "0"}},
+            {"id": "google/gemma-4-31b-it:free", "name": "Google: Gemma 4 31B (free)", "pricing": {"prompt": "0", "completion": "0"}},
+            {"id": "anthropic/claude-3-opus", "name": "Claude 3 Opus", "pricing": {"prompt": "15", "completion": "75"}}
+        ]
+    }
+
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.json.return_value = mock_api_payload
+
+    with patch("httpx.AsyncClient.get", AsyncMock(return_value=mock_resp)):
+        models = await fetch_openrouter_free_models(force_refresh=True)
+
+        ids = [m["id"] for m in models]
+        # openrouter/free router is always at top
+        assert ids[0] == "openrouter/free"
+        assert "nvidia/nemotron-3.5-lightning:free" in ids
+        assert "google/gemma-4-31b-it:free" in ids
+
+        # Non-chat / paid models MUST be excluded
+        assert "nvidia/nemotron-3.5-embed-1b:free" not in ids
+        assert "nvidia/nemotron-3.5-rerank-8b:free" not in ids
+        assert "openai/moderation:free" not in ids
+        assert "anthropic/claude-3-opus" not in ids
+
+
+@pytest.mark.asyncio
+async def test_user_ai_model_preference_db(tmp_path: Path, monkeypatch):
+    """Verifies reading and persisting user AI model preferences in SQLite."""
+    from database.db import init_db
+    from database.models import get_user_ai_model, set_user_ai_model
+
+    test_db = tmp_path / "pref_test.db"
+    monkeypatch.setattr(settings, "DB_PATH", test_db)
+    await init_db()
+
+    user_id = 777123
+    # Default model before setting
+    default_model = await get_user_ai_model(user_id)
+    assert "free" in default_model
+
+    # Set new preferred model
+    new_model = "nvidia/nemotron-3.5-lightning:free"
+    await set_user_ai_model(user_id, new_model)
+    saved_model = await get_user_ai_model(user_id)
+    assert saved_model == new_model
+
+
+def test_build_ai_models_menu_and_no_emojis():
+    """Verifies AI models menu formatting, 64-byte callback limit, and strictly zero emojis."""
+    from bot.keyboards import build_ai_models_menu
+
+    dummy_models = [
+        {"id": f"provider/model-{i}:free", "name": f"Test Model {i}"}
+        for i in range(12)
+    ]
+    current_model = "provider/model-0:free"
+
+    # Page 0 (items 0..4)
+    menu_p0 = build_ai_models_menu(dummy_models, current_model, page=0, page_size=5)
+    assert len(menu_p0) == 7  # 5 model rows + 1 nav row (Next >) + 1 action row
+
+    # Check Active marker
+    assert "[Active]" in menu_p0[0][0].text
+
+    # Check callback data does not exceed Telegram 64-byte limit
+    for row in menu_p0:
+        for btn in row:
+            data = btn.type.data
+            assert len(data) <= 64, f"Callback data too long: {data}"
+
+    # Verify strictly NO emojis in any button label
+    emoji_chars = ["🤖", "⚡", "🔍", "💡", "⚠️", "✅", "❌", "✨", "🚀", "🔥"]
+    for row in menu_p0:
+        for btn in row:
+            for em in emoji_chars:
+                assert em not in btn.text, f"Emoji '{em}' found in button text '{btn.text}'"

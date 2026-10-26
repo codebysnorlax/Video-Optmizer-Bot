@@ -27,13 +27,15 @@ class VideoAIAgent:
         task_id: str,
         input_path: Path,
         meta: Optional[MediaMetadata] = None,
-        client: Optional[OpenRouterClient] = None
+        client: Optional[OpenRouterClient] = None,
+        preferred_model: Optional[str] = None
     ):
         self.user_id = user_id
         self.task_id = task_id
         self.input_path = input_path
         self.meta = meta
         self.client = client or ai_client
+        self.preferred_model = preferred_model
         self.history: List[Dict[str, Any]] = []
         self.tool_executor = SafeToolExecutor(user_id, task_id, input_path, meta)
 
@@ -81,7 +83,8 @@ class VideoAIAgent:
             "or optimize, call the `execute_ffmpeg_plan` tool with appropriate filter chains.\n"
             "3. **Memory Safety on Snapdragon / Low RAM:** NEVER buffer unbounded frames into RAM. If user asks to reverse a video "
             "> 30s or > 720p, inform them or downscale to 720p.\n"
-            "4. **Tone & Style:** Be concise, professional, technically accurate, and user-friendly."
+            "4. **Tone & Style:** Be concise, professional, technically accurate, and user-friendly.\n"
+            "5. **No Emojis:** Do NOT include any emojis or emoji symbols in your responses. Output only plain, professional text."
         )
 
     async def process_message(
@@ -104,7 +107,8 @@ class VideoAIAgent:
         try:
             assistant_msg = await self.client.chat_completion(
                 messages=messages,
-                tools=AI_TOOLS_SCHEMA
+                tools=AI_TOOLS_SCHEMA,
+                preferred_model=self.preferred_model
             )
         except Exception as e:
             logger.error(f"OpenRouter API error: {e}")

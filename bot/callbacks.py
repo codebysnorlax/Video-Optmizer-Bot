@@ -275,6 +275,77 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         await handle_ai_apply_fix(event, task_ctx, client)
         return
 
+    # AI Model Settings Menu (Pagination & Selection)
+    if action_type == "aimod_page":
+        page = int(parts[1]) if len(parts) > 1 else 0
+        from core.ai.client import fetch_openrouter_free_models
+        from database.models import get_user_ai_model
+        from bot.keyboards import build_ai_models_menu
+
+        user_id = event.sender_id
+        current_model = await get_user_ai_model(user_id)
+        models = await fetch_openrouter_free_models()
+
+        text = (
+            "**AI Model Settings**\n\n"
+            f"• **Active Model:** `{current_model}`\n"
+            f"• **Available Free Models:** `{len(models)} detected`\n\n"
+            "Select a free model from OpenRouter below to use for AI Manual tasks:"
+        )
+        menu = build_ai_models_menu(models, current_model, page=page)
+        await event.edit(text, buttons=menu)
+        await event.answer()
+        return
+
+    if action_type == "aimod_idx":
+        idx = int(parts[1])
+        page = int(parts[2]) if len(parts) > 2 else 0
+        from core.ai.client import fetch_openrouter_free_models
+        from database.models import set_user_ai_model
+        from bot.keyboards import build_ai_models_menu
+
+        user_id = event.sender_id
+        models = await fetch_openrouter_free_models()
+        if 0 <= idx < len(models):
+            selected = models[idx]["id"]
+            await set_user_ai_model(user_id, selected)
+            from core.ai.client import ai_client
+            ai_client.set_model(selected)
+            current_model = selected
+            await event.answer(f"Switched model to: {selected}")
+        else:
+            current_model = settings.OPENROUTER_MODEL
+
+        text = (
+            "**AI Model Settings**\n\n"
+            f"• **Active Model:** `{current_model}`\n"
+            f"• **Available Free Models:** `{len(models)} detected`\n\n"
+            "Select a free model from OpenRouter below to use for AI Manual tasks:"
+        )
+        menu = build_ai_models_menu(models, current_model, page=page)
+        await event.edit(text, buttons=menu)
+        return
+
+    if action_type == "aimod_ref":
+        from core.ai.client import fetch_openrouter_free_models
+        from database.models import get_user_ai_model
+        from bot.keyboards import build_ai_models_menu
+
+        user_id = event.sender_id
+        models = await fetch_openrouter_free_models(force_refresh=True)
+        current_model = await get_user_ai_model(user_id)
+
+        text = (
+            "**AI Model Settings**\n\n"
+            f"• **Active Model:** `{current_model}`\n"
+            f"• **Available Free Models:** `{len(models)} detected` (Refreshed)\n\n"
+            "Select a free model from OpenRouter below to use for AI Manual tasks:"
+        )
+        menu = build_ai_models_menu(models, current_model, page=0)
+        await event.edit(text, buttons=menu)
+        await event.answer("Refreshed free models from OpenRouter!")
+        return
+
     # 2. Main Menu Navigation
     if action_type == "main_menu":
         task_id = parts[1]

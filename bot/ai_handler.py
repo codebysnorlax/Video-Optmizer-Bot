@@ -1,6 +1,6 @@
 """
 Telegram Bot AI Manual Mode Handler & Dispatcher
-Manages interactive AI engineer chat sessions, quick prompts, and sandboxed execution.
+Manages interactive AI engineer chat sessions, quick prompts, and sandboxed execution without emojis.
 """
 
 import os
@@ -33,7 +33,8 @@ from database.models import (
     record_task_start,
     record_task_complete,
     record_task_failed,
-    register_file_cache
+    register_file_cache,
+    get_user_ai_model
 )
 
 logger = logging.getLogger(__name__)
@@ -51,13 +52,17 @@ async def handle_ai_session_start(event, task_ctx, client) -> None:
     task_id = task_ctx.task_id
     user_id = task_ctx.user_id
 
+    # Fetch user's preferred model
+    active_model = await get_user_ai_model(user_id)
+
     # Create agent if needed
-    if not task_ctx.ai_agent:
+    if not task_ctx.ai_agent or task_ctx.ai_agent.preferred_model != active_model:
         task_ctx.ai_agent = VideoAIAgent(
             user_id=user_id,
             task_id=task_id,
             input_path=task_ctx.input_path,
-            meta=task_ctx.meta
+            meta=task_ctx.meta,
+            preferred_model=active_model
         )
 
     task_ctx.ai_session_active = True
@@ -68,22 +73,23 @@ async def handle_ai_session_start(event, task_ctx, client) -> None:
         pass
 
     ai_card = (
-        "🤖 **AI Video Engineer Activated!**\n\n"
+        "**AI Video Engineer Activated**\n\n"
         f"• **Target Video:** `{task_ctx.meta.file_name}`\n"
         f"• **Current Specs:** `{task_ctx.meta.resolution_label}` | `{format_bytes(task_ctx.meta.file_size_bytes)}` | `{int(task_ctx.meta.duration_seconds)}s`\n"
+        f"• **Active Model:** `{active_model}`\n"
         f"• **Engine:** `{current_hardware.description}`\n"
         f"• **Sandbox:** `storage/Ai_Workplace/{user_id}_{task_id}/`\n\n"
-        "💬 **Type your question or instruction directly in the chat below**, for example:\n"
-        " • *\"Why does this video lag on my phone?\"*\n"
-        " • *\"Why is the file size so huge?\"*\n"
-        " • *\"Downscale this from 4K to 1080p without losing quality\"*\n"
-        " • *\"Change aspect ratio to 9:16 vertical\"*\n"
-        " • *\"Reverse this video\"*\n\n"
-        "Or tap one of the quick options below:"
+        "• **Instructions:** Type your question or instruction directly in the chat below, for example:\n"
+        " - *\"Why does this video lag on my phone?\"*\n"
+        " - *\"Why is the file size so huge?\"*\n"
+        " - *\"Downscale this from 4K to 1080p without losing quality\"*\n"
+        " - *\"Change aspect ratio to 9:16 vertical\"*\n"
+        " - *\"Reverse this video\"*\n\n"
+        "Or select a quick action below:"
     )
 
     await event.edit(ai_card, buttons=build_ai_session_menu(task_id))
-    await event.answer("AI Engineer ready! Type your message or choose a quick option.")
+    await event.answer("AI Engineer is ready. Reply with your prompt or select an action.")
 
 
 async def handle_ai_quick_prompt(event, preset: str, task_ctx, client) -> None:
@@ -111,7 +117,7 @@ async def handle_ai_user_text(event, task_ctx, client) -> None:
     except Exception:
         pass
 
-    status_msg = task_ctx.status_message or await event.respond("🤖 **AI Engineer Thinking...**")
+    status_msg = task_ctx.status_message or await event.respond("**AI Engineer Thinking...**")
     await execute_ai_query(user_text, task_ctx, status_msg, client)
 
 
@@ -123,19 +129,21 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
     # Display thinking status
     try:
         await status_msg.edit(
-            f"🤖 **AI Video Engineer is thinking...**\n\n_\"{user_prompt[:80]}...\"_",
+            f"**AI Video Engineer is thinking...**\n\n_\"{user_prompt[:80]}...\"_",
             buttons=None
         )
     except Exception:
         pass
 
-    # Ensure agent is initialized
-    if not task_ctx.ai_agent:
+    # Ensure agent is initialized with user's model
+    active_model = await get_user_ai_model(user_id)
+    if not task_ctx.ai_agent or task_ctx.ai_agent.preferred_model != active_model:
         task_ctx.ai_agent = VideoAIAgent(
             user_id=user_id,
             task_id=task_id,
             input_path=task_ctx.input_path,
-            meta=task_ctx.meta
+            meta=task_ctx.meta,
+            preferred_model=active_model
         )
 
     # Run agent reasoning turn
@@ -145,7 +153,7 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
     if result.get("status") == "error":
         err_text = result.get("error", "Unknown error")
         await status_msg.edit(
-            f"⚠️ **AI Service Notice:**\n\n{err_text}\n\nYou can still use standard options below:",
+            f"**AI Service Notice:**\n\n{err_text}\n\nYou can still use standard options below:",
             buttons=build_ai_session_menu(task_id)
         )
         return
@@ -158,9 +166,9 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
 
         reduction_str = f" (~{reduction}% size savings)" if reduction > 0 else ""
         text = (
-            "🤖 **AI Video Diagnostic Analysis**\n\n"
-            f"🔍 **Root Cause:**\n{explanation}\n\n"
-            f"💡 **Recommended Fix:**\n{recommendation}{reduction_str}\n\n"
+            "**AI Video Diagnostic Analysis**\n\n"
+            f"• **Root Cause:**\n{explanation}\n\n"
+            f"• **Recommended Fix:**\n{recommendation}{reduction_str}\n\n"
             "Would you like me to apply this fix for you?"
         )
         # Store for 1-tap apply
@@ -179,13 +187,12 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
     if result.get("type") == "transcode":
         out_path = Path(result["output_path"])
         task_ctx.output_path = out_path
-        # Launch upload and completion flow
         asyncio.create_task(deliver_ai_output(task_ctx, result["plan_title"], out_path, status_msg, client))
         return
 
     # 4. Pure Text / Conversational Response
     reply_text = result.get("text") or result.get("assistant_text") or "I have processed your request."
-    formatted_reply = f"🤖 **AI Video Engineer:**\n\n{reply_text}"
+    formatted_reply = f"**AI Video Engineer:**\n\n{reply_text}"
     await status_msg.edit(formatted_reply, buttons=build_ai_session_menu(task_id))
 
 
@@ -243,7 +250,7 @@ async def run_and_deliver_ai_plan(task_ctx, plan: Dict[str, Any], status_msg, cl
                 raise asyncio.CancelledError()
             bar = make_progress_bar(percent)
             text = (
-                f"🤖 **AI Transcoding: {plan.get('plan_title')}**\n\n"
+                f"**AI Transcoding: {plan.get('plan_title')}**\n\n"
                 f"• **Progress:** {bar} `{percent:.1f}%`\n"
                 f"• **Speed:** `{speed}` | **FPS:** `{fps:.1f}`\n"
                 f"• **ETA:** `{eta}s`\n"
@@ -271,7 +278,7 @@ async def run_and_deliver_ai_plan(task_ctx, plan: Dict[str, Any], status_msg, cl
         if res.get("status") == "error":
             task_ctx.is_processing = False
             await status_msg.edit(
-                f"⚠️ **AI Transcoding Failed:**\n\n{res.get('error', 'Execution error')}",
+                f"**AI Transcoding Failed:**\n\n{res.get('error', 'Execution error')}",
                 buttons=build_ai_session_menu(task_id)
             )
             return
@@ -312,7 +319,7 @@ async def deliver_ai_output(task_ctx, plan_title: str, out_path: Path, status_ms
         speed_mb = (current_bytes / elapsed) / (1024 * 1024)
         eta = int((total_bytes - current_bytes) / max(1, current_bytes / elapsed))
         text = (
-            f"🤖 **Uploading AI Result: {plan_title}**\n\n"
+            f"**Uploading AI Result: {plan_title}**\n\n"
             f"• **Progress:** {bar} `{percent:.1f}%`\n"
             f"• **Uploaded:** `{cur_mb:.1f} MB / {tot_mb:.1f} MB`\n"
             f"• **Speed:** `{speed_mb:.1f} MB/s` | **ETA:** `{eta}s`"
@@ -327,16 +334,16 @@ async def deliver_ai_output(task_ctx, plan_title: str, out_path: Path, status_ms
         )
     except Exception as e:
         logger.error(f"AI output upload failed: {e}")
-        await status_msg.edit(f"⚠️ **Upload Failed:** {str(e)}", buttons=build_ai_session_menu(task_id))
+        await status_msg.edit(f"**Upload Failed:** {str(e)}", buttons=build_ai_session_menu(task_id))
         task_ctx.is_processing = False
         return
 
     # Probe output metadata for before/after comparison card
     out_meta = await probe_media(out_path)
-    before_after = format_before_after_analysis(meta, out_meta, "AI Manual Optimization", current_hardware.description)
+    before_after = format_before_after_analysis(meta, out_meta)
 
     caption = (
-        f"🤖 **AI Video Optimization Complete!**\n"
+        f"**AI Video Optimization Complete**\n"
         f"• **Plan Applied:** `{plan_title}`\n\n"
         f"{before_after}"
     )
@@ -356,7 +363,7 @@ async def deliver_ai_output(task_ctx, plan_title: str, out_path: Path, status_ms
     # Prompt user for disk cleanup
     disk = settings.get_disk_usage()
     cleanup_prompt = (
-        "✅ **Video Delivered Successfully!**\n\n"
+        "**Video Delivered Successfully**\n\n"
         f"• **Server Storage:** `{disk['free_gb']} GB free` ({disk['percent_used']}% used)\n"
         f"• **Temporary Sandbox:** `storage/Ai_Workplace/{user_id}_{task_id}/`\n\n"
         "Choose file retention options below:"

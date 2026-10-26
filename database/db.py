@@ -59,6 +59,15 @@ async def init_db() -> None:
             )
         """)
 
+        # User preferences table (e.g. AI model selection)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS user_preferences (
+                user_id INTEGER PRIMARY KEY,
+                ai_model TEXT,
+                updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )
+        """)
+
         # Backward compatibility column check
         async with db.execute("PRAGMA table_info(file_cache)") as cursor:
             cols = [row[1] for row in await cursor.fetchall()]

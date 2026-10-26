@@ -12,7 +12,8 @@ from bot.handlers import (
     handle_stats,
     handle_history,
     handle_storage,
-    handle_files
+    handle_files,
+    handle_ai_models
 )
 from bot.media_handler import handle_incoming_media, is_video_message
 from bot.callbacks import handle_callback_query
@@ -25,6 +26,7 @@ async def register_bot_menu_commands(client: TelegramClient) -> None:
     commands = [
         types.BotCommand(command="start", description="Start the bot and view instructions"),
         types.BotCommand(command="help", description="How to optimize and convert videos"),
+        types.BotCommand(command="model", description="Configure AI OpenRouter free model"),
         types.BotCommand(command="files", description="View, recall, or delete server cached files"),
         types.BotCommand(command="hardware", description="View CPU/GPU hardware acceleration info"),
         types.BotCommand(command="stats", description="View total bandwidth saved & task count"),
@@ -83,6 +85,10 @@ def create_bot_client() -> TelegramClient:
     @client.on(events.NewMessage(pattern=r"^/files$"))
     async def _files(event):
         await handle_files(event)
+
+    @client.on(events.NewMessage(pattern=r"^/(model|ai_settings)$"))
+    async def _model(event):
+        await handle_ai_models(event)
 
     # Register Incoming Media & Text Listener
     @client.on(events.NewMessage())
