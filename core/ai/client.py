@@ -27,7 +27,7 @@ DEFAULT_FREE_MODELS = [
     "thinkingmachines/inkling:free",
     "cohere/north-mini-code:free",
     "liquid/lfm-2.5-2.6b:free",
-    "google/gemini-2.0-flash-exp:free",
+    "recursive/flint-v1.0:free",
     "meta-llama/llama-3.3-70b-instruct:free",
     "qwen/qwen-2.5-coder-32b-instruct:free"
 ]
