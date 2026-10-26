@@ -219,7 +219,7 @@ def detect_hardware() -> HardwareProfile:
                 extra_args=["-init_hw_device", f"vaapi=va:{dri_dev}", "-filter_hw_device", "va", "-vf", "format=nv12,hwupload"]
             )
             hevc_encoder = "hevc_vaapi" if hevc_works else "libx265"
-            desc = f"Intel/AMD GPU (VAAPI @ {dri_dev})"
+            desc = "Intel/AMD GPU (VAAPI)"
             break
 
     # Check 2: NVIDIA NVENC (if VAAPI not used)

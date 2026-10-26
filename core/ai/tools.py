@@ -8,7 +8,7 @@ import json
 import logging
 from pathlib import Path
 from typing import Dict, Any, List, Optional, Callable, Awaitable
-from core.probe import probe_media, MediaMetadata, format_bytes, format_duration
+from core.probe import probe_media, MediaMetadata, format_bytes, format_duration, clean_display_name
 from core.hardware import current_hardware
 from core.engine import run_ffmpeg_with_progress, ProgressCallback
 from core.ai.skills import skill_registry
@@ -279,6 +279,7 @@ class SafeToolExecutor:
             }]
 
         deliverables: List[Dict[str, Any]] = []
+        total_ops = len(op_list)
 
         for op_idx, op in enumerate(op_list, start=1):
             raw_out_name = op.get("output_filename") or f"output_{op_idx}.mp4"
@@ -391,12 +392,15 @@ class SafeToolExecutor:
                 est_duration = self.meta.duration_seconds
 
             # Wrap progress callback with step context
+            disp_out_name = clean_display_name(safe_filename)
             async def op_progress(percent: float, speed: str, eta: int, fps: float):
                 if progress_callback:
                     try:
-                        await progress_callback(percent, speed, eta, fps, step_label=f"({op_idx}/{total_ops}) {safe_filename}")
+                        await progress_callback(percent, speed, eta, fps, step_label=f"({op_idx}/{total_ops}) {disp_out_name}")
                     except TypeError:
                         await progress_callback(percent, speed, eta, fps)
+                    except Exception as pe:
+                        logger.warning(f"Error in op_progress callback: {pe}")
 
             try:
                 await run_ffmpeg_with_progress(

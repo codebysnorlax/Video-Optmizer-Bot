@@ -33,6 +33,14 @@ def format_duration(seconds: float) -> str:
     return f"{minutes:02d}:{secs:02d}"
 
 
+def clean_display_name(filename: str) -> str:
+    """Strips internal task ID prefixes (e.g. 8cadedd8e0_) from filenames for user display."""
+    if not filename:
+        return ""
+    import re
+    return re.sub(r'^[a-f0-9]{10}_', '', filename)
+
+
 @dataclass
 class MediaMetadata:
     file_path: Path
@@ -88,9 +96,10 @@ class MediaMetadata:
         if self.is_high_bitrate and self.duration_seconds > 0:
             bitrate_note = f"\n[NOTE] **High Bitrate Bloat:** ~{self.overall_bitrate_kbps // 1000} Mbps (Can be drastically optimized)"
 
+        disp_name = clean_display_name(self.file_name)
         card = [
             "**Video Analysis Report**\n",
-            f"• **Name:** `{self.file_name}`",
+            f"• **Name:** `{disp_name}`",
             f"• **Size:** `{size_str}` {bitrate_note}",
             f"• **Duration:** `{dur_str}` ({int(self.duration_seconds)}s)",
         ]

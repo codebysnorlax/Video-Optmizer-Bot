@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import Optional, Dict, Any
 from telethon import events, Button
 from config.settings import settings
-from core.probe import format_bytes, format_duration, probe_media, format_before_after_analysis
+from core.probe import format_bytes, format_duration, probe_media, format_before_after_analysis, clean_display_name
 from core.hardware import current_hardware
 from core.terminal import term_log
 from core.engine import run_ffmpeg_with_progress
@@ -76,20 +76,21 @@ async def handle_ai_session_start(event, task_ctx, client) -> None:
     except Exception:
         pass
 
+    target_name = clean_display_name(task_ctx.meta.file_name)
     ai_card = (
         "**AI Video Assistant**\n\n"
-        f"• **Session Target:** `{task_ctx.meta.file_name}`\n"
+        f"• **Session Target:** `{target_name}`\n"
         f"• **Current Specs:** `{task_ctx.meta.resolution_label}` | `{format_bytes(task_ctx.meta.file_size_bytes)}` | `{int(task_ctx.meta.duration_seconds)}s`\n"
         f"• **Active Model:** `{active_model}`\n"
         f"• **Hardware:** `{current_hardware.description}`\n\n"
         "**Tell me what you need:**\n"
         "Describe your problem or request in plain English. I will analyze your media and execute the job directly:\n"
-        "• *\"Why does this lag on my phone?\"*\n"
-        "• *\"Decrease file size to 1080p or 360p without losing quality\"*\n"
-        "• *\"Separate audio and video and give me both files\"*\n"
-        "• *\"Extract audio as MP3\" or \"Mute this video\"*\n"
-        "• *\"Change aspect ratio to 9:16 vertical or reverse video\"*\n"
-        "• *\"Send an audio track or second video into this chat to combine or replace soundtracks\"*\n\n"
+        "• \"Why does this lag on my phone?\"\n"
+        "• \"Decrease file size to 1080p or 360p without losing quality\"\n"
+        "• \"Separate audio and video and give me both files\"\n"
+        "• \"Extract audio as MP3\" or \"Mute this video\"\n"
+        "• \"Change aspect ratio to 9:16 vertical or reverse video\"\n"
+        "• \"Send an audio track or second video into this chat to combine or replace soundtracks\"\n\n"
         "Type your message directly in the chat below:"
     )
 
@@ -192,7 +193,8 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
             f"• **Engine:** `{current_hardware.description}`\n"
             f"• **Sandbox:** `storage/Ai_Workplace/{user_id}_{task_id}/`"
         )
-        await updater.update(text, buttons=build_task_progress_menu(task_id))
+        is_initial = (percent == 0.0 or speed in ("init", "starting"))
+        await updater.update(text, force=is_initial, buttons=build_task_progress_menu(task_id))
 
     try:
         result = await task_ctx.ai_agent.process_message(
@@ -214,7 +216,7 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
         err_text = result.get("error", "Unknown error")
         task_ctx.is_processing = False
         await status_msg.edit(
-            f"**AI Notice:**\n\n{err_text}\n\nYou can rephrase your request or try again below:",
+            f"**AI Operation Failed**\n\n• **Reason:** `{err_text}`\n\nYou can rephrase your request or try again below:",
             buttons=build_ai_session_menu(task_id)
         )
         return
@@ -420,6 +422,21 @@ async def deliver_ai_results(
         )
 
         upload_start = time.time()
+        disp_name = clean_display_name(out_path.name)
+        file_size_str = format_bytes(out_path.stat().st_size)
+
+        # Notify user immediately that transcoding is complete and upload is beginning
+        try:
+            await status_msg.edit(
+                f"**Transcoding Complete! Uploading Deliverables ({idx}/{total_deliverables})**\n\n"
+                f"• **Plan:** `{plan_title}`\n"
+                f"• **File:** `{disp_name}`\n"
+                f"• **Size:** `{file_size_str}`\n"
+                f"• **Status:** Uploading to Telegram...",
+                buttons=build_task_progress_menu(task_id)
+            )
+        except Exception:
+            pass
 
         async def upload_progress(current_bytes: int, total_bytes: int):
             if task_ctx.is_cancelled:
@@ -432,9 +449,9 @@ async def deliver_ai_results(
             speed_mb = (current_bytes / elapsed) / (1024 * 1024)
             eta = int((total_bytes - current_bytes) / max(1, current_bytes / elapsed))
             text = (
-                f"**Uploading Deliverable ({idx}/{total_deliverables})**\n\n"
+                f"**Uploading Deliverables ({idx}/{total_deliverables})**\n\n"
                 f"• **Plan:** `{plan_title}`\n"
-                f"• **File:** `{out_path.name}`\n"
+                f"• **File:** `{disp_name}`\n"
                 f"• **Progress:** {bar} `{percent:.1f}%`\n"
                 f"• **Uploaded:** `{cur_mb:.1f} MB / {tot_mb:.1f} MB`\n"
                 f"• **Speed:** `{speed_mb:.1f} MB/s` | **ETA:** `{eta}s`"
@@ -450,7 +467,7 @@ async def deliver_ai_results(
         except Exception as e:
             logger.error(f"AI output upload failed for {out_path.name}: {e}")
             await status_msg.edit(
-                f"**Upload Failed on {out_path.name}:** {str(e)}",
+                f"**Upload Failed on {disp_name}:** `{str(e)}`",
                 buttons=build_ai_session_menu(task_id)
             )
             task_ctx.is_processing = False
@@ -465,7 +482,7 @@ async def deliver_ai_results(
             caption = (
                 f"**AI Deliverable ({idx}/{total_deliverables})**\n"
                 f"• **Plan Applied:** `{plan_title}`\n"
-                f"• **Deliverable:** `{out_path.name}`\n\n"
+                f"• **Deliverable:** `{disp_name}`\n\n"
                 f"{before_after}"
             )
             supports_streaming = True
@@ -474,7 +491,7 @@ async def deliver_ai_results(
             caption = (
                 f"**AI Deliverable ({idx}/{total_deliverables})**\n"
                 f"• **Plan Applied:** `{plan_title}`\n"
-                f"• **Deliverable:** `{out_path.name}`\n"
+                f"• **Deliverable:** `{disp_name}`\n"
                 f"• **Type:** Extracted Audio Track\n"
                 f"• **Size:** `{format_bytes(file_size)}` | **Duration:** `{dur_str}`"
             )
@@ -503,19 +520,19 @@ async def deliver_ai_results(
 
     asyncio.create_task(_delayed_workplace_cleanup(user_id, task_id, delay_sec=120))
 
-    # Prompt user for disk cleanup
-    disk = settings.get_disk_usage()
+    # Keep AI session active and display clean summary card
     file_plural = "Deliverable" if total_deliverables == 1 else "Deliverables"
-    cleanup_prompt = (
+    target_name = clean_display_name(task_ctx.meta.file_name)
+    summary_card = (
         f"**{file_plural} Delivered Successfully ({total_deliverables} files)**\n\n"
-        f"• **Server Storage:** `{disk['free_gb']} GB free` ({disk['percent_used']}% used)\n"
-        f"• **Temporary Sandbox:** `storage/Ai_Workplace/{user_id}_{task_id}/`\n"
+        f"• **Plan Applied:** `{plan_title}`\n"
+        f"• **Session Target:** `{target_name}`\n"
         f"• **Auto-Cleanup:** Sandbox files will be automatically deleted in 2 minutes.\n\n"
-        "Choose file retention options below:"
+        "AI Video Engineer is still active. You can type another instruction, request further changes, or send new media assets."
     )
-    await status_msg.edit(cleanup_prompt, buttons=build_cleanup_original_menu(task_id))
+    await status_msg.edit(summary_card, buttons=build_ai_session_menu(task_id))
     task_ctx.is_processing = False
-    task_ctx.ai_session_active = False
+    task_ctx.ai_session_active = True
 
 
 async def deliver_ai_output(task_ctx, plan_title: str, out_path: Path, status_msg, client) -> None:

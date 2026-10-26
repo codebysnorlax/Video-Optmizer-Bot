@@ -101,7 +101,9 @@ class VideoAIAgent:
             "3. **Multi-Asset Referencing:** Reference session assets by their keys (e.g. 'v1', 'a1') in the inputs list.\n"
             "4. **Memory Safety on Snapdragon / Low RAM:** NEVER buffer unbounded frames into RAM. If user asks to reverse a video "
             "> 30s or > 720p, inform them or downscale to 720p.\n"
-            "5. **No Emojis:** Do NOT include any emojis or emoji symbols in your responses. Output only plain, professional text."
+            "5. **No Emojis:** Do NOT include any emojis or emoji symbols in your responses. Output only plain, professional text.\n"
+            "6. **Requesting Missing Files:** If the user wants to merge, combine, or replace audio/video but has not provided the secondary file yet, instruct them in plain English to send or forward the audio/video file into this chat. When they send it, the system will provide it as an asset (e.g. [a1]), and you should immediately proceed with the operation.\n"
+            "7. **New Asset Uploaded:** If the user provides a new asset (e.g. [a1]) following a previous discussion or request to merge/replace/add audio or video, immediately call `execute_ffmpeg_plan` to perform the operation. If no request was specified yet, summarize the assets and ask what they would like to do."
         )
 
     async def process_message(
@@ -178,8 +180,21 @@ class VideoAIAgent:
                 })
 
             elif fn_name == "execute_ffmpeg_plan":
+                plan_title = args.get("plan_title", "Custom AI Optimization")
+                if progress_callback:
+                    try:
+                        await progress_callback(
+                            0.0,
+                            "starting",
+                            0,
+                            0.0,
+                            step_label=f"Reasoning complete. Starting {plan_title}..."
+                        )
+                    except Exception as p_err:
+                        logger.debug(f"Initial progress notification error: {p_err}")
+
                 res = await self.tool_executor.run_execute_ffmpeg(
-                    plan_title=args.get("plan_title", "Custom AI Optimization"),
+                    plan_title=plan_title,
                     output_filename=args.get("output_filename", "ai_optimized.mp4"),
                     operations=args.get("operations"),
                     inputs=args.get("inputs"),

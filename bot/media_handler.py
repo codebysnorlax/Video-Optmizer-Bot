@@ -12,7 +12,7 @@ import shutil
 from typing import Optional
 from telethon import events
 from config.settings import settings
-from core.probe import probe_media
+from core.probe import probe_media, clean_display_name
 from core.hardware import current_hardware
 from core.terminal import term_log
 from database.models import upsert_user
@@ -247,7 +247,8 @@ async def handle_incoming_session_asset(event: events.NewMessage.Event, task_ctx
     clean_name = "".join(c for c in file_name if c.isalnum() or c in (".", "_", "-")).strip()
     save_path = settings.DOWNLOAD_DIR / f"{task_ctx.task_id}_{clean_name}"
 
-    status_msg = await event.reply(f"**Adding new {media_type} to active AI session...**\n`{clean_name}`")
+    display_name = clean_display_name(clean_name)
+    status_msg = await event.reply(f"**Adding new {media_type} to active AI session...**\n`{display_name}`")
 
     try:
         await fast_download(
@@ -258,25 +259,24 @@ async def handle_incoming_session_asset(event: events.NewMessage.Event, task_ctx
         meta = await probe_media(save_path)
         asset_key = task_ctx.add_asset(save_path, meta=meta, media_type=media_type)
 
-        assets = task_ctx.get_assets()
-        asset_lines = []
-        for k, a in assets.items():
-            m = a.get("meta")
-            spec = f"{m.resolution_label} | " if (m and m.has_video) else ""
-            dur = f"{int(m.duration_seconds)}s" if m else ""
-            asset_lines.append(f"• `[{k}]` **{a['filename']}** ({spec}{dur})")
+        if task_ctx.ai_agent:
+            task_ctx.ai_agent.assets = task_ctx.get_assets()
+            task_ctx.ai_agent.tool_executor.assets = task_ctx.get_assets()
 
-        reply_text = (
-            f"**New Asset Added to AI Session:** `[{asset_key}] {clean_name}`\n\n"
-            "**Current Session Assets:**\n" +
-            "\n".join(asset_lines) +
-            "\n\n**What would you like me to do?**\n"
-            "You can type your request, for example:\n"
-            "- *\"Replace the audio of [v1] with [a1]\"*\n"
-            "- *\"Extract audio from [v1] as MP3\"*\n"
-            "- *\"Mute [v1] and keep original quality\"*"
+        await status_msg.edit(
+            f"**Asset Added:** `[{asset_key}] {display_name}`\n"
+            "AI Video Engineer is resuming your task..."
         )
-        await status_msg.edit(reply_text)
+
+        from bot.ai_handler import execute_ai_query
+        auto_prompt = (
+            f"I have uploaded the requested {media_type} file as [{asset_key}] ({display_name}). "
+            f"Please proceed with my request."
+        )
+        task_ctx.status_message = status_msg
+        await execute_ai_query(auto_prompt, task_ctx, status_msg, client)
+
     except Exception as e:
         logger.error(f"Failed to add asset to session: {e}", exc_info=True)
+        task_ctx.is_processing = False
         await status_msg.edit(f"**Failed to add {media_type} to AI session:** `{str(e)}`")

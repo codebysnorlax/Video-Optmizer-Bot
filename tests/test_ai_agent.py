@@ -605,6 +605,79 @@ async def test_deliver_ai_results_sequential_multi_upload(tmp_path):
         assert complete_kwargs["output_size"] == len(b"video_data_12345") + len(b"audio_data_67890")
         assert complete_kwargs["elapsed_time"] == 3.5
 
+        # AI session must remain active for follow-up conversation
+        assert mock_task_ctx.ai_session_active is True
+
+
+def test_clean_display_name_and_formatting():
+    """Verifies that internal task IDs are stripped and hardware descriptions are clean."""
+    from core.probe import clean_display_name
+    from core.hardware import detect_hardware
+
+    assert clean_display_name("8cadedd8e0_douyin_7693917933180826587.mp4") == "douyin_7693917933180826587.mp4"
+    assert clean_display_name("56f76b2768_video_only.mp4") == "video_only.mp4"
+    assert clean_display_name("plain_video.mp4") == "plain_video.mp4"
+    assert clean_display_name("") == ""
+
+    # Hardware description shouldn't contain long device paths that wrap awkwardly
+    hw = detect_hardware()
+    assert "/dev/dri/" not in hw.description
+
+
+@pytest.mark.asyncio
+async def test_handle_incoming_session_asset_auto_execution():
+    """Verifies that uploading a session asset automatically triggers execute_ai_query without reprompting."""
+    from bot.media_handler import handle_incoming_session_asset
+    from bot.task_manager import TaskContext
+
+    mock_event = AsyncMock()
+    mock_status_msg = AsyncMock()
+    mock_event.reply.return_value = mock_status_msg
+
+    # Mock audio message
+    mock_message = MagicMock()
+    mock_message.audio = MagicMock()
+    mock_message.file = MagicMock()
+    mock_message.file.name = "douyin_bgm.mp3"
+    mock_message.file.size = 1024
+    mock_event.message = mock_message
+
+    mock_task_ctx = TaskContext(
+        task_id="test123456",
+        user_id=123,
+        input_path=Path("/tmp/input.mp4"),
+        output_path=None,
+        meta=None,
+        status_message=mock_status_msg,
+        original_message_id=101
+    )
+    mock_task_ctx.ai_session_active = True
+    mock_client = AsyncMock()
+
+    mock_meta = MagicMock()
+    mock_meta.has_video = False
+    mock_meta.duration_seconds = 30.0
+    mock_meta.resolution_label = ""
+    mock_meta.file_size_bytes = 1024
+
+    with patch("bot.media_handler.fast_download", AsyncMock()), \
+         patch("bot.media_handler.probe_media", AsyncMock(return_value=mock_meta)), \
+         patch("bot.ai_handler.execute_ai_query", AsyncMock()) as mock_exec_query:
+
+        await handle_incoming_session_asset(mock_event, mock_task_ctx, mock_client)
+
+        # Asset registered in session
+        assets = mock_task_ctx.get_assets()
+        assert "a1" in assets
+        assert assets["a1"]["filename"] == "test123456_douyin_bgm.mp3"
+
+        # AI query was automatically triggered with asset key
+        assert mock_exec_query.call_count == 1
+        prompt_arg = mock_exec_query.call_args[0][0]
+        assert "[a1]" in prompt_arg
+        assert "douyin_bgm.mp3" in prompt_arg
+        assert "Please proceed" in prompt_arg
+
 
 def test_zero_emojis_in_all_ai_strings():
     """Verifies that AI menus, buttons, and prompts strictly contain zero emojis."""
