@@ -242,9 +242,37 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         await event.answer()
         return
 
-    # 1. AI Manual Notice
+    # 1. AI Manual Mode Activation & Quick Presets
     if action_type == "ai_manual":
-        await event.answer("AI Manual Mode is planned for future updates! Please use Optimize or Convert.", alert=True)
+        task_id = parts[1]
+        task_ctx = await get_or_restore_task_ctx(task_id, event)
+        if not task_ctx:
+            await event.answer("Session expired or file was deleted.", alert=True)
+            return
+        from bot.ai_handler import handle_ai_session_start
+        await handle_ai_session_start(event, task_ctx, client)
+        return
+
+    if action_type == "ai_quick":
+        preset = parts[1]
+        task_id = parts[2]
+        task_ctx = await get_or_restore_task_ctx(task_id, event)
+        if not task_ctx:
+            await event.answer("Session expired or file was deleted.", alert=True)
+            return
+        from bot.ai_handler import handle_ai_quick_prompt
+        await handle_ai_quick_prompt(event, preset, task_ctx, client)
+        return
+
+    if action_type == "ai_apply":
+        fix_action = parts[1]
+        task_id = parts[2]
+        task_ctx = await get_or_restore_task_ctx(task_id, event)
+        if not task_ctx:
+            await event.answer("Session expired or file was deleted.", alert=True)
+            return
+        from bot.ai_handler import handle_ai_apply_fix
+        await handle_ai_apply_fix(event, task_ctx, client)
         return
 
     # 2. Main Menu Navigation
@@ -254,6 +282,7 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         if not task_ctx:
             await event.answer("Session expired or file was deleted.", alert=True)
             return
+        task_ctx.ai_session_active = False
         menu = build_main_menu(task_id)
         summary = task_ctx.meta.get_summary_card(current_hardware.description)
         await event.edit(summary, buttons=menu)

@@ -84,14 +84,21 @@ def create_bot_client() -> TelegramClient:
     async def _files(event):
         await handle_files(event)
 
-    # Register Incoming Media Listener
+    # Register Incoming Media & Text Listener
     @client.on(events.NewMessage())
-    async def _media(event):
+    async def _media_or_text(event):
         # Ignore commands
         if event.raw_text and event.raw_text.startswith("/"):
             return
         if is_video_message(event.message):
             await handle_incoming_media(event, client)
+        elif event.raw_text:
+            # Check if user has an active AI Manual session
+            from bot.task_manager import task_manager
+            active_task = task_manager.get_active_ai_task_for_user(event.sender_id)
+            if active_task:
+                from bot.ai_handler import handle_ai_user_text
+                await handle_ai_user_text(event, active_task, client)
 
     # Register Callback Query Listener
     @client.on(events.CallbackQuery())

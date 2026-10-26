@@ -33,6 +33,10 @@ class TaskContext:
     active_async_task: Optional[asyncio.Task] = None
     current_process: Optional[Any] = None
     active_stage_label: str = ""
+    ai_session_active: bool = False
+    ai_agent: Optional[Any] = None
+    ai_workplace_dir: Optional[Path] = None
+    ai_last_action_plan: Optional[Dict[str, Any]] = None
 
 
 @dataclass
@@ -76,6 +80,13 @@ class TaskManager:
 
     def get_task(self, task_id: str) -> Optional[TaskContext]:
         return self._active_tasks.get(task_id)
+
+    def get_active_ai_task_for_user(self, user_id: int) -> Optional[TaskContext]:
+        """Finds any active AI session task for a specific user."""
+        for task in self._active_tasks.values():
+            if task.user_id == user_id and task.ai_session_active:
+                return task
+        return None
 
     def remove_task(self, task_id: str) -> Optional[TaskContext]:
         return self._active_tasks.pop(task_id, None)

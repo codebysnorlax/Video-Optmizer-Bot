@@ -14,7 +14,37 @@ def build_main_menu(task_id: str) -> List[List[Button]]:
             Button.inline("2. Convert", data=f"conv_menu:{task_id}".encode())
         ],
         [
-            Button.inline("3. AI Manual (Coming Soon)", data=f"ai_manual:{task_id}".encode())
+            Button.inline("3. AI Manual (Smart Fix & Edit)", data=f"ai_manual:{task_id}".encode())
+        ]
+    ]
+
+
+def build_ai_session_menu(task_id: str) -> List[List[Button]]:
+    """Builds interactive prompt shortcuts and Exit control for AI Manual mode."""
+    return [
+        [
+            Button.inline("Why is it lagging?", data=f"ai_quick:lag:{task_id}".encode()),
+            Button.inline("Shrink 4K to 1080p", data=f"ai_quick:1080:{task_id}".encode())
+        ],
+        [
+            Button.inline("Change to 9:16 (Vertical)", data=f"ai_quick:916:{task_id}".encode()),
+            Button.inline("Reverse Video", data=f"ai_quick:rev:{task_id}".encode())
+        ],
+        [
+            Button.inline("< Exit AI Mode (Back to Menu)", data=f"main_menu:{task_id}".encode())
+        ]
+    ]
+
+
+def build_ai_fix_menu(task_id: str, fix_action: str) -> List[List[Button]]:
+    """Builds action confirmation keyboard for AI recommendations."""
+    return [
+        [
+            Button.inline("Apply Recommended Fix", data=f"ai_apply:{fix_action}:{task_id}".encode())
+        ],
+        [
+            Button.inline("< Back to AI Manual", data=f"ai_manual:{task_id}".encode()),
+            Button.inline("< Main Menu", data=f"main_menu:{task_id}".encode())
         ]
     ]
 

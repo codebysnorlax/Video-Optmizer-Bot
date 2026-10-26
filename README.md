@@ -22,8 +22,13 @@ A high-performance, asynchronous Telegram bot designed for video ingestion, inte
    - **`2. Convert`**:
      - Video containers: `MP4 (H.264)`, `MKV`, `WEBM (VP9)`, `AVI`, `MOV`, `MPG`.
      - Audio extraction: `MP3`, `AAC (M4A)`, `OGG (Opus)`, `WAV`.
-   - **`3. AI Manual`**:
-     - Placeholder for upcoming AI video features.
+    - **`3. AI Manual (Smart Fix & Conversational Video Engineer)`**:
+      - Powered by an asynchronous ReAct agent using **OpenRouter free models** (Gemini 2.0 Flash, Llama 3.3 70B, Qwen 2.5 Coder).
+      - **Metadata Diagnosis**: Ask *"Why does this video lag on my phone?"* or *"Why is the file size so huge?"* to receive root-cause explanations and a 1-tap recommended fix.
+      - **Natural Language Video Editing**: Instruct the bot to *"Downscale 4K to 1080p without losing quality"*, *"Change aspect ratio to 9:16 vertical"*, or *"Reverse this video"*.
+      - **Snapdragon 636 / Termux Memory Guardrails**: Strictly monitors RAM buffer limits during intensive operations (e.g., video reversal) to prevent mobile Out-Of-Memory crashes.
+      - **Isolated Workspace Sandbox**: All AI transformations run in `storage/Ai_Workplace/<user_id>_<task_id>/` without altering pristine source files.
+      - **Dynamic Skills System**: Modular markdown skills in `skills/` dynamically inject domain-specific FFmpeg recipes on demand.
 4. **Live Real-Time Progress Reporting**:
    - Throttled real-time progress bars for **Download**, **FFmpeg Transcoding** (FPS, speed multiplier, ETA), and **Upload**.
 5. **Post-Delivery Disk Space Prompt**:
@@ -41,9 +46,18 @@ A high-performance, asynchronous Telegram bot designed for video ingestion, inte
 optmizer/
 ├── config/
 │   ├── __init__.py
-│   └── settings.py          # Environment, paths, and disk space monitor
+│   └── settings.py          # Environment, OpenRouter, and disk space monitor
+├── skills/                  # Modular AI Skills & Recipes
+│   ├── ffmpeg/              # Core FFmpeg rules and recipe cookbook
+│   ├── video_diagnosis/     # Playback lag, bloat, and codec diagnosis
+│   └── creative_fx/         # Reverse, aspect ratio (9:16), and speed rules
 ├── core/
 │   ├── __init__.py
+│   ├── ai/                  # Lightweight Async AI Engine (zero Rust/C dependencies)
+│   │   ├── client.py        # OpenRouter client with model fallback cascade
+│   │   ├── skills.py        # Dynamic SkillRegistry and RAM safety validator
+│   │   ├── tools.py         # Sandboxed safe tool dispatcher (diagnose, execute, verify)
+│   │   └── agent.py         # ReAct multi-turn conversational reasoning loop
 │   ├── hardware.py          # Auto-detects Intel VAAPI GPU vs Termux Snapdragon 636 CPU
 │   ├── probe.py             # FFprobe metadata parser & markdown analysis card
 │   ├── engine.py            # Async FFmpeg subprocess with live progress parsing
@@ -58,13 +72,15 @@ optmizer/
 │   ├── client.py            # Telethon MTProto client setup & event routing
 │   ├── handlers.py          # Slash commands (/start, /help, /hardware, /stats, /history)
 │   ├── media_handler.py     # Streaming download worker & video prober
-│   ├── keyboards.py         # Dynamic inline keyboards
+│   ├── ai_handler.py        # AI Manual session dispatcher and transcode runner
+│   ├── keyboards.py         # Dynamic inline keyboards (menus, AI controls)
 │   ├── callbacks.py         # Button click dispatcher & transcode execution
 │   ├── progress.py          # Throttled live Telegram progress updater
-│   └── task_manager.py      # Concurrency semaphore & in-flight state tracking
+│   └── task_manager.py      # Concurrency semaphore & active task/session tracking
 ├── storage/
 │   ├── downloads/           # Temporary download directory
-│   └── outputs/             # Transcoded output directory
+│   ├── outputs/             # Transcoded output directory
+│   └── Ai_Workplace/        # Isolated sandboxed AI task workspaces
 ├── tests/                   # Pytest test suite (100% passing)
 ├── run_bot.py               # Main application entry point
 ├── requirements.txt         # Production dependencies
