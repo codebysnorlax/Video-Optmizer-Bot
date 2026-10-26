@@ -929,3 +929,64 @@ async def test_safe_tool_executor_dual_input_auto_mapping_and_stream_copy(sample
         # Must include -shortest
         assert "-shortest" in cmd
 
+
+@pytest.mark.asyncio
+async def test_safe_tool_executor_json_stringified_arguments(tmp_path):
+    """Verifies that stringified JSON arrays for stream_mapping and extra_args are cleanly normalized."""
+    vid_file = tmp_path / "video_muted.mp4"
+    vid_file.write_bytes(b"vid_bytes")
+    aud_file = tmp_path / "new_audio.mp3"
+    aud_file.write_bytes(b"aud_bytes")
+
+    vid_meta = make_dummy_metadata(file_path=vid_file, file_name="video_muted.mp4", file_size_bytes=1000, has_video=True)
+    aud_meta = make_dummy_metadata(file_path=aud_file, file_name="new_audio.mp3", file_size_bytes=200, has_video=False)
+
+    assets = {
+        "v2": {"id": "v2", "filename": "video_muted.mp4", "filepath": vid_file, "meta": vid_meta, "media_type": "video"},
+        "a1": {"id": "a1", "filename": "new_audio.mp3", "filepath": aud_file, "meta": aud_meta, "media_type": "audio"}
+    }
+
+    executor = SafeToolExecutor(
+        user_id=111,
+        task_id="json_str_task",
+        input_path=vid_file,
+        meta=vid_meta,
+        assets=assets
+    )
+
+    captured_cmds = []
+    async def mock_run_ffmpeg(cmd, total_duration_seconds, progress_callback=None, on_process_started=None):
+        captured_cmds.append(cmd)
+        out_p = Path(cmd[-1])
+        out_p.write_bytes(b"merged_out")
+
+    with patch("core.ai.tools.run_ffmpeg_with_progress", side_effect=mock_run_ffmpeg), \
+         patch("core.ai.tools.probe_media", AsyncMock(return_value=vid_meta)):
+
+        # Pass exact stringified arguments that LLM produced:
+        res = await executor.run_execute_ffmpeg(
+            plan_title="Merge new audio track with optimized video",
+            output_filename="final_with_audio.mp4",
+            inputs='["v2", "a1"]',
+            video_codec="copy",
+            audio_codec="aac",
+            stream_mapping='["-map", "0:v:0", "-map", "1:a:0"]',
+            extra_args='["-shortest"]'
+        )
+
+        assert res["status"] == "success"
+        cmd = captured_cmds[0]
+        # Verify no trailing quotes or brackets from character splitting
+        assert "[" not in cmd
+        assert "]" not in cmd
+        assert '"' not in cmd
+        assert "'" not in cmd
+        # Verify valid mapping
+        map_indices = [i for i, x in enumerate(cmd) if x == "-map"]
+        assert len(map_indices) == 2
+        assert cmd[map_indices[0] + 1] == "0:v:0"
+        assert cmd[map_indices[1] + 1] == "1:a:0"
+        # Verify shortest flag present exactly once
+        assert cmd.count("-shortest") == 1
+
+

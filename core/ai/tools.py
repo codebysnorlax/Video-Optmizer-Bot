@@ -156,6 +156,16 @@ AI_TOOLS_SCHEMA: List[Dict[str, Any]] = [
                     "crf": {
                         "type": "integer",
                         "description": "CRF (18-28)."
+                    },
+                    "stream_mapping": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Stream mapping options (e.g. ['-map', '0:v:0', '-map', '1:a:0'])."
+                    },
+                    "extra_args": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Safe additional flags (e.g. ['-shortest'])."
                     }
                 },
                 "required": ["plan_title"]
@@ -185,6 +195,48 @@ AI_TOOLS_SCHEMA: List[Dict[str, Any]] = [
 # ==============================================================================
 # Tool Execution Implementations
 # ==============================================================================
+
+def _normalize_string_or_list(val: Any) -> List[str]:
+    """
+    Safely normalizes arguments that may arrive as a python list, a JSON-stringified list
+    (e.g. '["-map", "0:v:0"]'), comma-separated string, or space-separated string into List[str].
+    """
+    if not val:
+        return []
+    if isinstance(val, str):
+        s = val.strip()
+        if s.startswith("[") and s.endswith("]"):
+            try:
+                parsed = json.loads(s)
+                if isinstance(parsed, list):
+                    return [str(x).strip().strip("'\"") for x in parsed if str(x).strip()]
+            except Exception:
+                pass
+        # Comma-separated or space-separated fallback
+        if "," in s and not s.startswith("-"):
+            return [x.strip().strip("'\"") for x in s.split(",") if x.strip()]
+        return [x.strip().strip("'\"") for x in s.split() if x.strip()]
+    elif isinstance(val, (list, tuple)):
+        result = []
+        for item in val:
+            if isinstance(item, str):
+                item_s = item.strip()
+                if item_s.startswith("[") and item_s.endswith("]"):
+                    try:
+                        parsed = json.loads(item_s)
+                        if isinstance(parsed, list):
+                            result.extend([str(x).strip().strip("'\"") for x in parsed if str(x).strip()])
+                            continue
+                    except Exception:
+                        pass
+                cleaned = item_s.strip("'\"")
+                if cleaned:
+                    result.append(cleaned)
+            elif item is not None:
+                result.append(str(item))
+        return result
+    return [str(val).strip().strip("'\"")]
+
 
 class SafeToolExecutor:
     """Executes validated tool requests within a sandboxed workplace."""
@@ -260,9 +312,18 @@ class SafeToolExecutor:
         """
         # Normalize into a list of operations
         op_list: List[Dict[str, Any]] = []
-        if operations and len(operations) > 0:
-            op_list = operations
-        else:
+        if operations:
+            if isinstance(operations, str):
+                try:
+                    parsed_ops = json.loads(operations)
+                    if isinstance(parsed_ops, list):
+                        op_list = parsed_ops
+                except Exception:
+                    pass
+            elif isinstance(operations, list):
+                op_list = operations
+
+        if not op_list:
             default_out = output_filename or f"ai_fixed_{self.input_path.stem}.mp4"
             op_list = [{
                 "inputs": inputs or ["v1"],
@@ -294,7 +355,7 @@ class SafeToolExecutor:
             out_path = self.workplace_dir / safe_filename
 
             # Resolve input paths
-            op_inputs = op.get("inputs") or ["v1"]
+            op_inputs = _normalize_string_or_list(op.get("inputs")) or ["v1"]
             resolved_inputs = [self._resolve_input_path(str(i)) for i in op_inputs]
             for p in resolved_inputs:
                 if not p.exists():
@@ -342,16 +403,23 @@ class SafeToolExecutor:
                 cmd.extend(["-i", str(p)])
 
             # Stream Mapping
-            if op.get("stream_mapping"):
-                for m in op["stream_mapping"]:
-                    if isinstance(m, str):
-                        parts = m.strip().split()
-                        if len(parts) == 1 and not parts[0].startswith("-"):
-                            cmd.extend(["-map", parts[0]])
+            raw_sm = op.get("stream_mapping")
+            sm_list = _normalize_string_or_list(raw_sm)
+            if sm_list:
+                i = 0
+                while i < len(sm_list):
+                    token = sm_list[i].strip().strip("'\"")
+                    if token == "-map":
+                        if i + 1 < len(sm_list):
+                            clean_target = sm_list[i + 1].strip().strip("'\"")
+                            if clean_target and clean_target != "-map":
+                                cmd.extend(["-map", clean_target])
+                            i += 2
                         else:
-                            cmd.extend(parts)
-                    elif isinstance(m, list):
-                        cmd.extend(m)
+                            i += 1
+                    elif token:
+                        cmd.extend(["-map", token])
+                        i += 1
             elif len(resolved_inputs) == 2:
                 # Auto stream mapping when combining 2 inputs (e.g. video + audio)
                 try:
@@ -405,12 +473,14 @@ class SafeToolExecutor:
 
             # Extra safe arguments (e.g. -shortest, -ss, -to)
             has_shortest = False
-            if op.get("extra_args"):
-                for ea in op["extra_args"]:
-                    if isinstance(ea, str):
-                        cmd.extend(ea.split())
-                        if "-shortest" in ea:
-                            has_shortest = True
+            raw_ea = op.get("extra_args")
+            ea_list = _normalize_string_or_list(raw_ea)
+            for ea in ea_list:
+                ea_clean = ea.strip().strip("'\"")
+                if ea_clean:
+                    cmd.append(ea_clean)
+                    if ea_clean == "-shortest":
+                        has_shortest = True
 
             if len(resolved_inputs) >= 2 and not has_shortest and not op_extract_audio:
                 cmd.append("-shortest")
