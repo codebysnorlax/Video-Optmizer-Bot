@@ -96,23 +96,38 @@ def create_bot_client() -> TelegramClient:
         # Ignore commands
         if event.raw_text and event.raw_text.startswith("/"):
             return
-        from bot.media_handler import is_video_message, is_audio_message, handle_incoming_media, handle_incoming_session_asset
-        from bot.task_manager import task_manager
+        try:
+            from bot.media_handler import is_video_message, is_audio_message, handle_incoming_media, handle_incoming_session_asset
+            from bot.task_manager import task_manager
 
-        is_video = is_video_message(event.message)
-        is_audio = is_audio_message(event.message)
-        active_task = task_manager.get_active_ai_task_for_user(event.sender_id)
+            active_task = task_manager.get_active_ai_task_for_user(event.sender_id)
 
-        if active_task and (is_audio or is_video):
-            await handle_incoming_session_asset(event, active_task, client)
-            return
+            # Avoid taking new input while AI is processing or thinking
+            if active_task and active_task.is_processing:
+                try:
+                    await event.reply(
+                        "**AI is currently busy processing your video task.**\n"
+                        "Please wait for the AI to finish before sending new requests or files."
+                    )
+                except Exception:
+                    pass
+                return
 
-        if is_video:
-            await handle_incoming_media(event, client)
-        elif event.raw_text:
-            if active_task:
-                from bot.ai_handler import handle_ai_user_text
-                await handle_ai_user_text(event, active_task, client)
+            is_video = is_video_message(event.message)
+            is_audio = is_audio_message(event.message)
+
+            if active_task and (is_audio or is_video):
+                await handle_incoming_session_asset(event, active_task, client)
+                return
+
+            if is_video:
+                await handle_incoming_media(event, client)
+            elif event.raw_text:
+                if active_task:
+                    from bot.ai_handler import handle_ai_user_text
+                    await handle_ai_user_text(event, active_task, client)
+        except Exception as e:
+            logger.error("Unhandled exception in _media_or_text: %s", e, exc_info=True)
 
     # Register Callback Query Listener
     @client.on(events.CallbackQuery())

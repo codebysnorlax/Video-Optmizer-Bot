@@ -180,8 +180,7 @@ def test_bot_ai_keyboards():
     assert b"ai_manual:t1" in ai_btn.type.data
 
     session_menu = build_ai_session_menu("t1")
-    assert len(session_menu) >= 3
-    assert any(b"ai_quick:lag:t1" in btn.type.data for row in session_menu for btn in row)
+    assert len(session_menu) >= 1
     assert any(b"main_menu:t1" in btn.type.data for row in session_menu for btn in row)
 
     fix_menu = build_ai_fix_menu("t1", "recommended")

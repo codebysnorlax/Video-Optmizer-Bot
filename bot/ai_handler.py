@@ -81,27 +81,24 @@ async def handle_ai_session_start(event, task_ctx, client) -> None:
         f"• **Session Target:** `{task_ctx.meta.file_name}`\n"
         f"• **Current Specs:** `{task_ctx.meta.resolution_label}` | `{format_bytes(task_ctx.meta.file_size_bytes)}` | `{int(task_ctx.meta.duration_seconds)}s`\n"
         f"• **Active Model:** `{active_model}`\n"
-        f"• **Engine:** `{current_hardware.description}`\n"
-        f"• **Sandbox:** `storage/Ai_Workplace/{user_id}_{task_id}/`\n\n"
-        "**Conversational Problem Solving:**\n"
-        "You are not limited to fixed commands. Type any request or question directly in chat:\n"
-        " - *\"Can you give me separate audio and video from that video?\"*\n"
-        " - *\"Why does this video lag on my phone?\"*\n"
-        " - *\"Why is the file size so huge?\"*\n"
-        " - *\"Downscale this from 4K to 1080p without losing quality\"*\n"
-        " - *\"Extract the audio as MP3\"*\n"
-        " - *\"Mute this video and remove all audio tracks\"*\n"
-        " - *\"Change aspect ratio to 9:16 vertical or reverse video\"*\n\n"
-        "**Multi-File Workflows:** You can send another audio or video file right now into this chat, and ask to replace soundtracks, remux, or combine them.\n\n"
-        "Or choose an example action below:"
+        f"• **Hardware:** `{current_hardware.description}`\n\n"
+        "**Tell me what you need:**\n"
+        "Describe your problem or request in plain English. I will analyze your media and execute the job directly:\n"
+        "• *\"Why does this lag on my phone?\"*\n"
+        "• *\"Decrease file size to 1080p or 360p without losing quality\"*\n"
+        "• *\"Separate audio and video and give me both files\"*\n"
+        "• *\"Extract audio as MP3\" or \"Mute this video\"*\n"
+        "• *\"Change aspect ratio to 9:16 vertical or reverse video\"*\n"
+        "• *\"Send an audio track or second video into this chat to combine or replace soundtracks\"*\n\n"
+        "Type your message directly in the chat below:"
     )
 
     await event.edit(ai_card, buttons=build_ai_session_menu(task_id))
-    await event.answer("AI Engineer is ready. Reply with your prompt or select an action.")
+    await event.answer("AI Engineer is ready. Reply with your prompt or problem.")
 
 
 async def handle_ai_quick_prompt(event, preset: str, task_ctx, client) -> None:
-    """Handles preset one-tap prompt buttons."""
+    """Handles preset one-tap prompt buttons if triggered."""
     prompt_map = {
         "split": "Separate this video into two distinct deliverables: a muted video track and an extracted MP3 audio track, and deliver both.",
         "extract_audio": "Extract the audio track from this video as an MP3 audio file.",
@@ -121,6 +118,16 @@ async def handle_ai_user_text(event, task_ctx, client) -> None:
     if not user_text:
         return
 
+    if task_ctx.is_processing:
+        try:
+            await event.reply(
+                "**AI is currently busy processing a task.**\n"
+                "Please wait for the current operation to finish before sending new instructions."
+            )
+        except Exception:
+            pass
+        return
+
     # Delete incoming user message for cleaner chat interface if possible
     try:
         await event.delete()
@@ -132,14 +139,18 @@ async def handle_ai_user_text(event, task_ctx, client) -> None:
 
 
 async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> None:
-    """Executes an AI reasoning turn and directs output to diagnosis or transcode."""
+    """Executes an AI reasoning turn with live progress reporting and directs output to transcode or diagnosis."""
     task_id = task_ctx.task_id
     user_id = task_ctx.user_id
 
-    # Display thinking status
+    task_ctx.is_processing = True
+    task_ctx.is_cancelled = False
+    start_time = time.time()
+
+    # Display initial thinking status
     try:
         await status_msg.edit(
-            f"**AI Video Engineer is thinking...**\n\n_\"{user_prompt[:80]}...\"_",
+            f"**AI Engineer is analyzing your request...**\n\n_\"{user_prompt[:80]}...\"_",
             buttons=None
         )
     except Exception:
@@ -160,20 +171,57 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
         task_ctx.ai_agent.assets = task_ctx.get_assets()
         task_ctx.ai_agent.tool_executor.assets = task_ctx.get_assets()
 
-    # Run agent reasoning turn
-    result = await task_ctx.ai_agent.process_message(user_prompt)
+    updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
+
+    async def transcode_progress(percent: float, speed: str, eta: int, fps: float, step_label: Optional[str] = None):
+        if task_ctx.is_cancelled:
+            if task_ctx.current_process:
+                try:
+                    task_ctx.current_process.kill()
+                except Exception:
+                    pass
+            raise asyncio.CancelledError()
+        bar = make_progress_bar(percent)
+        step_line = f"• **Operation:** `{step_label}`\n" if step_label else ""
+        text = (
+            f"**AI Transcoding in Progress...**\n\n"
+            f"{step_line}"
+            f"• **Progress:** {bar} `{percent:.1f}%`\n"
+            f"• **Speed:** `{speed}` | **FPS:** `{fps:.1f}`\n"
+            f"• **ETA:** `{eta}s`\n"
+            f"• **Engine:** `{current_hardware.description}`\n"
+            f"• **Sandbox:** `storage/Ai_Workplace/{user_id}_{task_id}/`"
+        )
+        await updater.update(text, buttons=build_task_progress_menu(task_id))
+
+    try:
+        result = await task_ctx.ai_agent.process_message(
+            user_prompt,
+            progress_callback=transcode_progress,
+            on_process_started=lambda p: setattr(task_ctx, "current_process", p)
+        )
+    except Exception as e:
+        logger.error(f"Error during AI reasoning turn: {e}", exc_info=True)
+        task_ctx.is_processing = False
+        await status_msg.edit(
+            f"**AI Processing Error:**\n\n{str(e)}\n\nPlease try again or rephrase your request.",
+            buttons=build_ai_session_menu(task_id)
+        )
+        return
 
     # 1. Error Response
     if result.get("status") == "error":
         err_text = result.get("error", "Unknown error")
+        task_ctx.is_processing = False
         await status_msg.edit(
-            f"**AI Service Notice:**\n\n{err_text}\n\nYou can still use standard options below:",
+            f"**AI Notice:**\n\n{err_text}\n\nYou can rephrase your request or try again below:",
             buttons=build_ai_session_menu(task_id)
         )
         return
 
     # 2. Diagnostic Result
     if result.get("type") == "diagnosis":
+        task_ctx.is_processing = False
         explanation = result.get("explanation", "")
         recommendation = result.get("recommended_action", "")
         reduction = result.get("estimated_reduction_percent", 0)
@@ -185,7 +233,6 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
             f"• **Recommended Fix:**\n{recommendation}{reduction_str}\n\n"
             "Would you like me to apply this fix for you?"
         )
-        # Store for 1-tap apply
         task_ctx.ai_last_action_plan = {
             "plan_title": "AI Recommended Fix",
             "vf_filter": "scale=-2:1080" if (task_ctx.meta and (task_ctx.meta.width or 0) > 1920) else None,
@@ -203,6 +250,7 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
         out_paths = [Path(p) for p in raw_paths if p]
         if out_paths:
             task_ctx.output_path = out_paths[0]
+        task_ctx.processing_elapsed_time = max(0.1, time.time() - start_time)
         asyncio.create_task(deliver_ai_results(
             task_ctx,
             result.get("plan_title", "AI Result"),
@@ -214,6 +262,7 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
         return
 
     # 4. Pure Text / Conversational Response
+    task_ctx.is_processing = False
     reply_text = result.get("text") or result.get("assistant_text") or "I have processed your request."
     formatted_reply = f"**AI Video Engineer:**\n\n{reply_text}"
     await status_msg.edit(formatted_reply, buttons=build_ai_session_menu(task_id))
@@ -443,13 +492,25 @@ async def deliver_ai_results(
     elapsed_time = getattr(task_ctx, "processing_elapsed_time", 1.0)
     await record_task_complete(task_id, output_size=total_output_size, elapsed_time=elapsed_time)
 
+    # Schedule automatic deletion of sandbox files after 2 minutes (120 seconds)
+    async def _delayed_workplace_cleanup(u_id: int, t_id: str, delay_sec: int = 120):
+        await asyncio.sleep(delay_sec)
+        try:
+            settings.clean_ai_workplace(u_id, t_id)
+            logger.info(f"Auto-cleaned AI workplace sandbox for user {u_id}, task {t_id} after {delay_sec}s")
+        except Exception as cleanup_err:
+            logger.warning(f"Error during delayed workplace cleanup: {cleanup_err}")
+
+    asyncio.create_task(_delayed_workplace_cleanup(user_id, task_id, delay_sec=120))
+
     # Prompt user for disk cleanup
     disk = settings.get_disk_usage()
     file_plural = "Deliverable" if total_deliverables == 1 else "Deliverables"
     cleanup_prompt = (
         f"**{file_plural} Delivered Successfully ({total_deliverables} files)**\n\n"
         f"• **Server Storage:** `{disk['free_gb']} GB free` ({disk['percent_used']}% used)\n"
-        f"• **Temporary Sandbox:** `storage/Ai_Workplace/{user_id}_{task_id}/`\n\n"
+        f"• **Temporary Sandbox:** `storage/Ai_Workplace/{user_id}_{task_id}/`\n"
+        f"• **Auto-Cleanup:** Sandbox files will be automatically deleted in 2 minutes.\n\n"
         "Choose file retention options below:"
     )
     await status_msg.edit(cleanup_prompt, buttons=build_cleanup_original_menu(task_id))

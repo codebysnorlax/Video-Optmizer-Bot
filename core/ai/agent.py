@@ -174,7 +174,7 @@ class VideoAIAgent:
                     "role": "tool",
                     "tool_call_id": call_id,
                     "name": fn_name,
-                    "content": json.dumps(res)
+                    "content": json.dumps(res, default=str)
                 })
 
             elif fn_name == "execute_ffmpeg_plan":
@@ -200,7 +200,7 @@ class VideoAIAgent:
                     "role": "tool",
                     "tool_call_id": call_id,
                     "name": fn_name,
-                    "content": json.dumps(res)
+                    "content": json.dumps(res, default=str)
                 })
 
             elif fn_name == "verify_media":
@@ -210,7 +210,7 @@ class VideoAIAgent:
                     "role": "tool",
                     "tool_call_id": call_id,
                     "name": fn_name,
-                    "content": json.dumps(res)
+                    "content": json.dumps(res, default=str)
                 })
 
         # Primary tool result

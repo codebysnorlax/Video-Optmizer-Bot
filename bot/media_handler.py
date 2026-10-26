@@ -252,8 +252,8 @@ async def handle_incoming_session_asset(event: events.NewMessage.Event, task_ctx
     try:
         await fast_download(
             client=client,
-            message=message,
-            target_path=save_path
+            location_or_message=message,
+            out_path=save_path
         )
         meta = await probe_media(save_path)
         asset_key = task_ctx.add_asset(save_path, meta=meta, media_type=media_type)

@@ -390,11 +390,19 @@ class SafeToolExecutor:
             if est_duration <= 0.0 and self.meta:
                 est_duration = self.meta.duration_seconds
 
+            # Wrap progress callback with step context
+            async def op_progress(percent: float, speed: str, eta: int, fps: float):
+                if progress_callback:
+                    try:
+                        await progress_callback(percent, speed, eta, fps, step_label=f"({op_idx}/{total_ops}) {safe_filename}")
+                    except TypeError:
+                        await progress_callback(percent, speed, eta, fps)
+
             try:
                 await run_ffmpeg_with_progress(
                     cmd=cmd,
                     total_duration_seconds=est_duration,
-                    progress_callback=progress_callback,
+                    progress_callback=op_progress if progress_callback else None,
                     on_process_started=on_process_started
                 )
             except Exception as e:
@@ -417,8 +425,7 @@ class SafeToolExecutor:
                 "size_bytes": out_path.stat().st_size,
                 "formatted_size": format_bytes(out_path.stat().st_size),
                 "resolution": out_meta.resolution_label if (out_meta and out_meta.has_video) else "Audio Track",
-                "duration": format_duration(out_meta.duration_seconds) if out_meta else "Unknown",
-                "meta": out_meta
+                "duration": format_duration(out_meta.duration_seconds) if out_meta else "Unknown"
             })
 
         if not deliverables:
