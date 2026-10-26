@@ -304,7 +304,7 @@ class SafeToolExecutor:
         stream_mapping: Optional[List[str]] = None,
         extra_args: Optional[List[str]] = None,
         progress_callback: Optional[ProgressCallback] = None,
-        on_process_started: Optional[Callable[[any], None]] = None
+        on_process_started: Optional[Callable[[Any], None]] = None
     ) -> Dict[str, Any]:
         """
         Validates arguments, enforces Snapdragon 636 / mobile memory guardrails,
@@ -506,7 +506,7 @@ class SafeToolExecutor:
 
             # Wrap progress callback with step context
             disp_out_name = clean_display_name(safe_filename)
-            async def op_progress(percent: float, speed: str, eta: int, fps: float):
+            async def op_progress(percent: float, speed: str, eta: Optional[int], fps: float):
                 if progress_callback:
                     try:
                         await progress_callback(percent, speed, eta, fps, step_label=f"({op_idx}/{total_ops}) {disp_out_name}")

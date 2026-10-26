@@ -5,12 +5,12 @@ Asynchronous FFmpeg Execution Engine with Live Progress Parser
 import asyncio
 import logging
 import re
-from typing import List, Callable, Optional, Awaitable
+from typing import List, Callable, Optional, Awaitable, Any
 
 logger = logging.getLogger(__name__)
 
-# Type for progress callback: (percent: float, speed_str: str, eta_sec: Optional[int], fps_val: float) -> Awaitable[None]
-ProgressCallback = Callable[[float, str, Optional[int], float], Awaitable[None]]
+# Type for progress callback: accepts percent, speed_str, eta_sec, fps_val, and optional kwargs like step_label
+ProgressCallback = Callable[..., Awaitable[Any]]
 
 
 def parse_time_str(time_str: str) -> float:
@@ -29,7 +29,7 @@ async def run_ffmpeg_with_progress(
     total_duration_seconds: float,
     progress_callback: Optional[ProgressCallback] = None,
     progress_interval: float = 0.2,
-    on_process_started: Optional[Callable[[any], None]] = None
+    on_process_started: Optional[Callable[[Any], None]] = None
 ) -> None:
     """
     Executes FFmpeg with asynchronous line-by-line progress parsing.
