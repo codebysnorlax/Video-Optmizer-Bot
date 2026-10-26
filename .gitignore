@@ -24,6 +24,9 @@ storage/outputs/*
 !storage/outputs/.gitkeep
 storage/Ai_Workplace/*
 !storage/Ai_Workplace/.gitkeep
+storage/debug-ai/*
+!storage/debug-ai/.gitkeep
+/debug-ai
 
 # Environment variables
 .env

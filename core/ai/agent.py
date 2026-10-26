@@ -6,6 +6,7 @@ and provides technical diagnosis or video optimization.
 
 import json
 import logging
+import time
 from pathlib import Path
 from typing import List, Dict, Any, Optional, Callable, Awaitable
 from core.probe import MediaMetadata, format_bytes, format_duration
@@ -14,6 +15,8 @@ from core.engine import ProgressCallback
 from core.ai.client import ai_client, OpenRouterClient
 from core.ai.skills import skill_registry
 from core.ai.tools import AI_TOOLS_SCHEMA, SafeToolExecutor
+from core.ai.debug_logger import ai_debug_logger
+from config.settings import settings
 
 logger = logging.getLogger(__name__)
 
@@ -85,6 +88,7 @@ class VideoAIAgent:
         self.preferred_model = preferred_model
         self.assets = assets or {}
         self.history: List[Dict[str, Any]] = []
+        self.turn_counter: int = 0
         self.tool_executor = SafeToolExecutor(user_id, task_id, input_path, meta, assets=self.assets)
 
     def _build_system_prompt(self, user_prompt: str) -> str:
@@ -204,6 +208,13 @@ class VideoAIAgent:
         Executes one turn of the ReAct reasoning loop.
         Returns a structured dictionary with agent response, tool execution results, and status.
         """
+        self.turn_counter += 1
+        turn_idx = self.turn_counter
+        start_time = time.time()
+        media_before = self.meta
+        assets_before = dict(self.assets) if self.assets else {}
+        active_model = self.preferred_model or getattr(self.client, "default_model", settings.OPENROUTER_MODEL)
+
         # Append user message
         self.history.append({"role": "user", "content": user_text})
 
@@ -220,11 +231,29 @@ class VideoAIAgent:
             )
         except Exception as e:
             logger.error(f"OpenRouter API error: {e}")
-            return {
+            err_dict = {
                 "status": "error",
                 "error": f"AI service error: {str(e)}",
                 "text": "Sorry, I encountered an issue connecting to the AI service. Please verify your OpenRouter API key or try again."
             }
+            ai_debug_logger.log_turn(
+                user_id=self.user_id,
+                task_id=self.task_id,
+                turn_index=turn_idx,
+                user_input=user_text,
+                model=active_model,
+                media_before=media_before,
+                assets_before=assets_before,
+                system_prompt=system_prompt,
+                injected_skills=skill_registry.get_relevant_skills(user_text),
+                assistant_raw=None,
+                tool_calls=None,
+                tool_results=None,
+                primary_result=err_dict,
+                final_reply=err_dict["text"],
+                elapsed_seconds=time.time() - start_time
+            )
+            return err_dict
 
         tool_calls = assistant_msg.get("tool_calls")
         content = (assistant_msg.get("content") or "").strip()
@@ -234,11 +263,29 @@ class VideoAIAgent:
             if not content:
                 content = "I have processed your request. What would you like to do next?"
             self.history.append({"role": "assistant", "content": content})
-            return {
+            text_result = {
                 "status": "success",
                 "type": "text",
                 "text": content
             }
+            ai_debug_logger.log_turn(
+                user_id=self.user_id,
+                task_id=self.task_id,
+                turn_index=turn_idx,
+                user_input=user_text,
+                model=active_model,
+                media_before=media_before,
+                assets_before=assets_before,
+                system_prompt=system_prompt,
+                injected_skills=skill_registry.get_relevant_skills(user_text),
+                assistant_raw=assistant_msg,
+                tool_calls=None,
+                tool_results=None,
+                primary_result=text_result,
+                final_reply=content,
+                elapsed_seconds=time.time() - start_time
+            )
+            return text_result
 
         # Handle Tool Calls
         self.history.append(assistant_msg)
@@ -357,5 +404,23 @@ class VideoAIAgent:
             )
             self.history.append({"role": "assistant", "content": fallback_text})
             primary_result["assistant_text"] = fallback_text
+
+        ai_debug_logger.log_turn(
+            user_id=self.user_id,
+            task_id=self.task_id,
+            turn_index=turn_idx,
+            user_input=user_text,
+            model=active_model,
+            media_before=media_before,
+            assets_before=assets_before,
+            system_prompt=system_prompt,
+            injected_skills=skill_registry.get_relevant_skills(user_text),
+            assistant_raw=assistant_msg,
+            tool_calls=tool_calls,
+            tool_results=execution_results,
+            primary_result=primary_result,
+            final_reply=primary_result.get("assistant_text") or primary_result.get("text", ""),
+            elapsed_seconds=time.time() - start_time
+        )
 
         return primary_result

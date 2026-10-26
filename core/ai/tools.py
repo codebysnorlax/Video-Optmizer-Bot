@@ -340,6 +340,7 @@ class SafeToolExecutor:
             }]
 
         deliverables: List[Dict[str, Any]] = []
+        executed_commands: List[str] = []
         total_ops = len(op_list)
 
         for op_idx, op in enumerate(op_list, start=1):
@@ -514,6 +515,9 @@ class SafeToolExecutor:
                     except Exception as pe:
                         logger.warning(f"Error in op_progress callback: {pe}")
 
+            cmd_str = " ".join(cmd)
+            executed_commands.append(cmd_str)
+
             try:
                 await run_ffmpeg_with_progress(
                     cmd=cmd,
@@ -525,13 +529,17 @@ class SafeToolExecutor:
                 logger.error(f"Sandbox FFmpeg execution failed for {safe_filename}: {e}")
                 return {
                     "status": "error",
-                    "error": f"FFmpeg execution failed on {safe_filename}: {str(e)}"
+                    "error": f"FFmpeg execution failed on {safe_filename}: {str(e)}",
+                    "executed_commands": executed_commands,
+                    "ffmpeg_command": cmd_str
                 }
 
             if not out_path.exists() or out_path.stat().st_size == 0:
                 return {
                     "status": "error",
-                    "error": f"Operation finished but output file '{safe_filename}' was not generated or is empty."
+                    "error": f"Operation finished but output file '{safe_filename}' was not generated or is empty.",
+                    "executed_commands": executed_commands,
+                    "ffmpeg_command": cmd_str
                 }
 
             out_meta = await probe_media(out_path)
@@ -560,11 +568,16 @@ class SafeToolExecutor:
                 "formatted_size": format_bytes(out_path.stat().st_size),
                 "resolution": ffprobe_dict["resolution"],
                 "duration": ffprobe_dict["formatted_duration"],
+                "ffmpeg_command": cmd_str,
                 "ffprobe": ffprobe_dict
             })
 
         if not deliverables:
-            return {"status": "error", "error": "No deliverables produced by operations."}
+            return {
+                "status": "error",
+                "error": "No deliverables produced by operations.",
+                "executed_commands": executed_commands
+            }
 
         first = deliverables[0]
         return {
@@ -579,7 +592,9 @@ class SafeToolExecutor:
             "formatted_size": first["formatted_size"],
             "resolution": first["resolution"],
             "duration": first["duration"],
-            "ffprobe": first.get("ffprobe", {})
+            "ffprobe": first.get("ffprobe", {}),
+            "executed_commands": executed_commands,
+            "ffmpeg_command": executed_commands[0] if executed_commands else ""
         }
 
 

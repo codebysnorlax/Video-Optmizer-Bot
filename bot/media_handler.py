@@ -259,6 +259,21 @@ async def handle_incoming_session_asset(event: events.NewMessage.Event, task_ctx
         meta = await probe_media(save_path)
         asset_key = task_ctx.add_asset(save_path, meta=meta, media_type=media_type)
 
+        from core.ai.debug_logger import ai_debug_logger
+        ai_debug_logger.log_session_event(
+            user_id=task_ctx.user_id,
+            task_id=task_ctx.task_id,
+            event_type="asset_uploaded",
+            details={
+                "asset_key": asset_key,
+                "filename": display_name,
+                "media_type": media_type,
+                "size_bytes": save_path.stat().st_size if save_path.exists() else 0,
+                "duration_seconds": meta.duration_seconds if meta else 0.0,
+                "resolution": meta.resolution_label if (meta and meta.has_video) else "Audio Track"
+            }
+        )
+
         if task_ctx.ai_agent:
             task_ctx.ai_agent.assets = task_ctx.get_assets()
             task_ctx.ai_agent.tool_executor.assets = task_ctx.get_assets()

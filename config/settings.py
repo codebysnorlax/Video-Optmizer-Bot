@@ -17,6 +17,9 @@ load_dotenv(BASE_DIR / ".env")
 
 @dataclass
 class Settings:
+    # Base directory
+    BASE_DIR: Path = BASE_DIR
+
     # Telegram Credentials
     BOT_TOKEN: str = os.getenv("BOT_TOKEN", "").strip()
     TELEGRAM_API_ID: int = int(os.getenv("TELEGRAM_API_ID", "0"))
@@ -26,6 +29,7 @@ class Settings:
     DOWNLOAD_DIR: Path = BASE_DIR / os.getenv("DOWNLOAD_DIR", "storage/downloads")
     OUTPUT_DIR: Path = BASE_DIR / os.getenv("OUTPUT_DIR", "storage/outputs")
     AI_WORKPLACE_DIR: Path = BASE_DIR / os.getenv("AI_WORKPLACE_DIR", "storage/Ai_Workplace")
+    AI_DEBUG_DIR: Path = BASE_DIR / os.getenv("AI_DEBUG_DIR", "storage/debug-ai")
     DB_PATH: Path = BASE_DIR / os.getenv("DB_PATH", "database/optimizer.db")
 
     # AI Configuration
@@ -45,7 +49,19 @@ class Settings:
         self.DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)
         self.OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
         self.AI_WORKPLACE_DIR.mkdir(parents=True, exist_ok=True)
+        self.AI_DEBUG_DIR.mkdir(parents=True, exist_ok=True)
         self.DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+        # Create convenience root symlink debug-ai -> storage/debug-ai if possible
+        root_debug = BASE_DIR / "debug-ai"
+        if not root_debug.exists():
+            try:
+                root_debug.symlink_to(self.AI_DEBUG_DIR, target_is_directory=True)
+            except Exception:
+                try:
+                    root_debug.mkdir(parents=True, exist_ok=True)
+                except Exception:
+                    pass
 
     def get_ai_workplace(self, user_id: int, task_id: str) -> Path:
         """Get or create isolated sandbox directory for a specific AI task."""

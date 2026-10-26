@@ -1208,4 +1208,134 @@ async def test_deliver_ai_results_conversational_chat_reply_and_finally_safety(t
         assert mock_status_msg.edit.called
 
 
+def test_ai_debug_logger_turn_logging(tmp_path):
+    """Verifies that AIDebugLogger properly records turn JSON, Markdown log, and global index."""
+    import json
+    from core.ai.debug_logger import AIDebugLogger
+    from core.probe import MediaMetadata
+
+    debug_root = tmp_path / "debug-ai"
+    logger = AIDebugLogger(debug_root)
+
+    in_f = tmp_path / "src.mp4"
+    in_f.write_bytes(b"data")
+    before_meta = MediaMetadata(
+        file_path=in_f,
+        file_name="src.mp4",
+        file_size_bytes=10000000,
+        duration_seconds=12.0,
+        container_format="mov,mp4",
+        has_video=True,
+        video_codec="hevc",
+        width=1920,
+        height=1080,
+        fps=30.0,
+        video_bitrate_kbps=6000,
+        has_audio=True,
+        audio_codec="aac",
+        audio_channels=2,
+        audio_sample_rate=48000,
+        audio_bitrate_kbps=128,
+        overall_bitrate_kbps=6128,
+        is_high_bitrate=True,
+        raw_info={}
+    )
+
+    primary_res = {
+        "status": "success",
+        "plan_title": "Black and White",
+        "executed_commands": ["ffmpeg -i src.mp4 -vf hue=s=0 -c:v libx264 -c:a copy out.mp4"],
+        "deliverables": [
+            {
+                "filename": "out_bw.mp4",
+                "path": str(tmp_path / "out_bw.mp4"),
+                "size_bytes": 5000000,
+                "formatted_size": "4.8 MB",
+                "resolution": "1080p FHD (1920x1080)",
+                "duration": "00:12",
+                "ffmpeg_command": "ffmpeg -i src.mp4 -vf hue=s=0 -c:v libx264 -c:a copy out.mp4",
+                "ffprobe": {
+                    "video_codec": "h264",
+                    "audio_codec": "aac",
+                    "resolution": "1080p FHD (1920x1080)",
+                    "formatted_size": "4.8 MB",
+                    "formatted_duration": "00:12"
+                }
+            }
+        ]
+    }
+
+    turn_file = logger.log_turn(
+        user_id=12345,
+        task_id="abcde",
+        turn_index=1,
+        user_input="make my video black and white",
+        model="openrouter/free",
+        media_before=before_meta,
+        assets_before={"v1": {"filename": "src.mp4", "media_type": "video", "meta": before_meta}},
+        system_prompt="System instructions...",
+        injected_skills="Recipe: hue=s=0",
+        assistant_raw={"role": "assistant", "content": None, "tool_calls": [{"function": {"name": "execute_ffmpeg_plan", "arguments": "{}"}}]},
+        tool_calls=[{"function": {"name": "execute_ffmpeg_plan", "arguments": "{}"}}],
+        tool_results=[primary_res],
+        primary_result=primary_res,
+        final_reply="I converted your video to black and white.",
+        elapsed_seconds=3.5
+    )
+
+    assert turn_file is not None
+    assert turn_file.exists()
+
+    # 1. Verify JSON file
+    with open(turn_file, "r", encoding="utf-8") as f:
+        data = json.load(f)
+    assert data["user_id"] == 12345
+    assert data["task_id"] == "abcde"
+    assert data["turn_index"] == 1
+    assert data["user_input"] == "make my video black and white"
+    assert data["media_before"]["primary"]["video_codec"] == "hevc"
+    assert data["execution"]["status"] == "success"
+    assert "ffmpeg -i src.mp4" in data["execution"]["executed_commands"][0]
+    assert data["media_after"]["comparison"]["size_reduction_percent"] == 50.0
+
+    # 2. Verify session_log.md
+    session_dir = debug_root / "12345_abcde"
+    md_file = session_dir / "session_log.md"
+    assert md_file.exists()
+    md_content = md_file.read_text(encoding="utf-8")
+    assert "AI Diagnostic Session: 12345_abcde" in md_content
+    assert "make my video black and white" in md_content
+    assert "ffmpeg -i src.mp4" in md_content
+    assert "50.0% change" in md_content
+
+    # 3. Verify sessions.jsonl
+    idx_file = debug_root / "sessions.jsonl"
+    assert idx_file.exists()
+    idx_content = idx_file.read_text(encoding="utf-8")
+    assert "12345" in idx_content
+    assert "abcde" in idx_content
+
+
+def test_ai_debug_logger_event_logging(tmp_path):
+    """Verifies that AIDebugLogger properly records session events."""
+    from core.ai.debug_logger import AIDebugLogger
+
+    debug_root = tmp_path / "debug-ai"
+    logger = AIDebugLogger(debug_root)
+
+    logger.log_session_event(
+        user_id=888,
+        task_id="task_event",
+        event_type="asset_uploaded",
+        details={"filename": "sound.mp3", "media_type": "audio"}
+    )
+
+    event_file = debug_root / "888_task_event" / "events.jsonl"
+    assert event_file.exists()
+    content = event_file.read_text(encoding="utf-8")
+    assert "asset_uploaded" in content
+    assert "sound.mp3" in content
+
+
+
 
