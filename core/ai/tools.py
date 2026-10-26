@@ -26,7 +26,7 @@ AI_TOOLS_SCHEMA: List[Dict[str, Any]] = [
         "type": "function",
         "function": {
             "name": "diagnose_video",
-            "description": "Provide a technical explanation ONLY when user asks a pure informational question (e.g. 'Why does this lag?', 'Why is this file size so big?'). NEVER call this tool if user asks to 'optimize', 'fix', 'remove audio', 'mute', 'convert', 'add audio', or perform any editing action. For any editing or optimization request, call execute_ffmpeg_plan or prompt the user directly.",
+            "description": "Provide a technical explanation ONLY when user asks a pure informational question without requesting any change (e.g. 'Why does this video lag on my phone?'). NEVER call this tool to inspect a video before editing; all metadata is already provided. For any editing, optimization, audio removal, or conversion request, call execute_ffmpeg_plan directly.",
             "parameters": {
                 "type": "object",
                 "properties": {

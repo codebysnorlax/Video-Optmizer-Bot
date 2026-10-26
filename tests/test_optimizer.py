@@ -493,3 +493,31 @@ def test_720p_and_1080p_bitrate_modes():
     assert "copy" in cmd_1080_same
 
 
+def test_get_optimal_scale_filter_alias():
+    """Verifies that get_optimal_scale_filter works identically to get_scale_filter."""
+    meta_4k_portrait = MediaMetadata(
+        file_path=Path("/tmp/4k.mp4"),
+        file_name="4k.mp4",
+        file_size_bytes=1000,
+        duration_seconds=10.0,
+        container_format="mp4",
+        has_video=True,
+        video_codec="hevc",
+        width=2160,
+        height=3840,
+        fps=60.0,
+        video_bitrate_kbps=5000,
+        has_audio=False,
+        audio_codec=None,
+        audio_channels=None,
+        audio_sample_rate=None,
+        audio_bitrate_kbps=None,
+        overall_bitrate_kbps=5000,
+        is_high_bitrate=False,
+        raw_info={}
+    )
+    assert VideoOptimizer.get_optimal_scale_filter(meta_4k_portrait, 1080) == "scale=1080:-2"
+    assert VideoOptimizer.get_scale_filter(meta_4k_portrait, 1080) == "scale=1080:-2"
+
+
+

@@ -294,7 +294,7 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
 
 async def handle_ai_apply_fix(event, task_ctx, client) -> None:
     """Applies the recommended fix generated during diagnosis."""
-    scale_filter = VideoOptimizer.get_optimal_scale_filter(task_ctx.meta, 1080) if task_ctx.meta else None
+    scale_filter = VideoOptimizer.get_scale_filter(task_ctx.meta, 1080) if task_ctx.meta else None
     plan = task_ctx.ai_last_action_plan or {
         "plan_title": "AI Recommended Fix",
         "vf_filter": scale_filter,

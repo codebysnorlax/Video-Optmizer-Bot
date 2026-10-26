@@ -57,6 +57,8 @@ class VideoOptimizer:
                 return f"scale=-2:{max_dim}"
         return None
 
+    get_optimal_scale_filter = get_scale_filter
+
     @staticmethod
     def get_fps_filter(meta: MediaMetadata, max_fps: float = 60.0) -> Optional[str]:
         """

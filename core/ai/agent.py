@@ -4,6 +4,7 @@ Manages multi-turn conversation, dynamically injects skills, executes sandboxed 
 and provides technical diagnosis or video optimization.
 """
 
+import asyncio
 import json
 import logging
 import time
@@ -146,6 +147,7 @@ class VideoAIAgent:
             f"{skills_context}\n\n"
             "### OPERATIONAL GUIDELINES (STRICT):\n"
             "1. **Action Requests vs Informational Questions:**\n"
+            "   - You ALREADY have full verified metadata (resolution, codecs, bitrate, duration) for all files under 'CURRENT PRIMARY VIDEO METADATA' and 'AVAILABLE SESSION ASSETS'. You do NOT need to inspect or diagnose before editing!\n"
             "   - If the user asks you to DO or CHANGE something (e.g. 'optimize it', 'remove audio', 'mute', 'add audio', 'replace audio', 'fix lag', 'make it smooth', 'convert', 'downscale', 'black and white'):\n"
             "     NEVER call `diagnose_video`! `diagnose_video` is STRICTLY reserved for pure questions like 'Why does this video lag on my phone?' when the user asks for an explanation without any editing command.\n"
             "     For any action request, you must call `execute_ffmpeg_plan` or ask the user for missing files directly.\n"
