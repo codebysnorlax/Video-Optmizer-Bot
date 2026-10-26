@@ -207,7 +207,14 @@ async def handle_incoming_media(event: events.NewMessage.Event, client) -> None:
         task_ctx.download_time = download_time
         task_ctx.probe_time = probe_time
         task_ctx.current_stage = "idle"
-        task_ctx.active_stage_label = ""
+        # Check if user sent a caption / text instruction along with the video
+        caption = (getattr(message, "text", "") or getattr(message, "message", "") or "").strip()
+        if caption and not caption.startswith("/"):
+            task_ctx.ai_session_active = True
+            task_ctx.ai_workplace_dir = settings.get_ai_workplace(user_id, task_id)
+            from bot.ai_handler import execute_ai_query
+            await execute_ai_query(caption, task_ctx, status_msg, client)
+            return
 
         # Prompt user with options
         await status_msg.edit(summary_text, buttons=main_menu)

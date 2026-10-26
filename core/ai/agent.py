@@ -156,6 +156,7 @@ class VideoAIAgent:
             "     * If source is <= 1080p (e.g. 1080p or 720p): KEEP NATIVE RESOLUTION (do NOT add any scale filter).\n"
             "     * NEVER drop resolution down to 480p or 360p unless the user explicitly types the words '480p', '360p', or 'lowest resolution'.\n"
             "     * Use CRF 20-22 with libx264 for crisp, high-fidelity visual output.\n"
+            "   - For ANY video processing (including creative filters like black and white, sepia, saturation) on sources > 1080p (e.g. 4K UHD): Always combine your filter with downscaling to 1080p FHD (portrait: scale=1080:-2, landscape: scale=-2:1080, e.g. vf_filter='hue=s=0,scale=1080:-2') so encoding finishes quickly and smoothly without exhausting CPU or memory while delivering crisp 1080p.\n"
             "3. **Audio Removal & Missing Audio Requests:**\n"
             "   - If the user asks to remove/mute audio AND add a new audio track, but the new audio track is not yet in the session assets ([a1], [a2], etc.):\n"
             "     * If the user ALSO asked to optimize or mute right now: Call `execute_ffmpeg_plan` with mute_video_only=True (audio_codec='none') and 1080p scale to deliver the optimized muted video immediately, AND in your conversational response tell the user: 'I have optimized your video to 1080p without losing quality and removed the existing audio. Please upload or forward the new audio file you want to add, and I will merge it with this video!'\n"
@@ -371,12 +372,21 @@ class VideoAIAgent:
 
         # Follow-up completion turn so the model evaluates tool results and produces assistant response
         # tools MUST be None here so the model provides a final conversational answer instead of an unexpected tool call
+        if progress_callback:
+            try:
+                await progress_callback(100.0, "done", 0, 0.0, step_label="Transcoding complete. Formulating AI summary...")
+            except Exception:
+                pass
+
         try:
             follow_up_messages = [{"role": "system", "content": self._build_system_prompt(user_text)}] + sanitize_message_history(self.history, complete_trailing=False)[-8:]
-            follow_up_msg = await self.client.chat_completion(
-                messages=follow_up_messages,
-                tools=None,
-                preferred_model=self.preferred_model
+            follow_up_msg = await asyncio.wait_for(
+                self.client.chat_completion(
+                    messages=follow_up_messages,
+                    tools=None,
+                    preferred_model=self.preferred_model
+                ),
+                timeout=12.0
             )
             follow_up_content = (follow_up_msg.get("content") or "").strip()
             if not follow_up_content:

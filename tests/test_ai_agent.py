@@ -1336,6 +1336,61 @@ def test_ai_debug_logger_event_logging(tmp_path):
     assert "asset_uploaded" in content
     assert "sound.mp3" in content
 
+def test_get_latest_task_for_user():
+    """Verifies that task_manager can find the most recent task for a user regardless of AI session active flag."""
+    tm = TaskManager()
+    t1 = TaskContext(task_id="t1", user_id=100, input_path=Path("vid1.mp4"), output_path=None, meta=None, status_message=None, original_message_id=1, t_received=1.0)
+    t2 = TaskContext(task_id="t2", user_id=200, input_path=Path("vid2.mp4"), output_path=None, meta=None, status_message=None, original_message_id=2, t_received=2.0)
+    t3 = TaskContext(task_id="t3", user_id=100, input_path=Path("vid3.mp4"), output_path=None, meta=None, status_message=None, original_message_id=3, t_received=3.0)
+
+    tm.register_task(t1)
+    tm.register_task(t2)
+    tm.register_task(t3)
+
+    assert tm.get_active_ai_task_for_user(100) is None
+    latest = tm.get_latest_task_for_user(100)
+    assert latest is not None
+    assert latest.task_id == "t3"
 
 
+@pytest.mark.asyncio
+async def test_execute_ai_query_text_fallback_direct_message(sample_metadata):
+    """Verifies that execute_ai_query sends a direct Telegram message if editing status_msg fails."""
+    from bot.ai_handler import execute_ai_query
 
+    task_ctx = TaskContext(
+        task_id="test_fallback",
+        user_id=999,
+        input_path=Path("sample.mp4"),
+        output_path=None,
+        meta=sample_metadata,
+        status_message=MagicMock(),
+        original_message_id=10,
+        t_received=1.0
+    )
+
+    from bot.ai_handler import get_user_ai_model
+    active_model = await get_user_ai_model(999)
+
+    mock_agent = MagicMock()
+    mock_agent.process_message = AsyncMock(return_value={
+        "status": "success",
+        "type": "text",
+        "text": "This is a direct conversational answer."
+    })
+    mock_agent.preferred_model = active_model
+    task_ctx.ai_agent = mock_agent
+
+    status_msg = MagicMock()
+    status_msg.edit = AsyncMock(side_effect=Exception("Message not modified or deleted"))
+
+    mock_client = MagicMock()
+    mock_client.send_message = AsyncMock()
+
+    await execute_ai_query("hello", task_ctx, status_msg, mock_client)
+
+    # status_msg.edit failed, so client.send_message must be called
+    mock_client.send_message.assert_called_once()
+    args, kwargs = mock_client.send_message.call_args
+    assert args[0] == 999
+    assert "This is a direct conversational answer." in args[1]

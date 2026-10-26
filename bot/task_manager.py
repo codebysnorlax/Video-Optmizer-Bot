@@ -122,6 +122,13 @@ class TaskManager:
                 return task
         return None
 
+    def get_latest_task_for_user(self, user_id: int) -> Optional[TaskContext]:
+        """Finds the most recent task for a user, regardless of whether AI session was toggled."""
+        for task in reversed(list(self._active_tasks.values())):
+            if task.user_id == user_id:
+                return task
+        return None
+
     def remove_task(self, task_id: str) -> Optional[TaskContext]:
         return self._active_tasks.pop(task_id, None)
 

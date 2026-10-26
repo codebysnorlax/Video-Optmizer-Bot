@@ -217,10 +217,18 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
     if result.get("status") == "error":
         err_text = result.get("error", "Unknown error")
         task_ctx.is_processing = False
-        await status_msg.edit(
-            f"**AI Operation Failed**\n\n• **Reason:** `{err_text}`\n\nYou can rephrase your request or try again below:",
-            buttons=build_ai_session_menu(task_id)
-        )
+        formatted_err = f"**AI Operation Failed**\n\n• **Reason:** `{err_text}`\n\nYou can rephrase your request or try again below:"
+        sent = False
+        try:
+            await status_msg.edit(formatted_err, buttons=build_ai_session_menu(task_id))
+            sent = True
+        except Exception:
+            pass
+        if not sent:
+            try:
+                await client.send_message(user_id, formatted_err, buttons=build_ai_session_menu(task_id))
+            except Exception:
+                pass
         return
 
     # 2. Diagnostic Result
@@ -270,14 +278,18 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
     task_ctx.is_processing = False
     reply_text = result.get("text") or result.get("assistant_text") or "I have processed your request."
     formatted_reply = f"**AI Video Engineer:**\n\n{reply_text}"
+    sent = False
     try:
         await status_msg.edit(formatted_reply, buttons=build_ai_session_menu(task_id))
+        sent = True
     except Exception as e:
         logger.warning(f"Failed to edit status message with text reply: {e}")
+
+    if not sent:
         try:
-            await event.reply(formatted_reply, buttons=build_ai_session_menu(task_id))
-        except Exception:
-            pass
+            await client.send_message(user_id, formatted_reply, buttons=build_ai_session_menu(task_id))
+        except Exception as e2:
+            logger.error(f"Failed to send direct text message reply: {e2}")
 
 
 async def handle_ai_apply_fix(event, task_ctx, client) -> None:
@@ -574,6 +586,16 @@ async def deliver_ai_results(
             await status_msg.edit(summary_card, buttons=status_buttons)
         except Exception as edit_err:
             logger.debug(f"Status card edit notice: {edit_err}")
+    except Exception as deliver_err:
+        logger.error(f"Error delivering AI deliverables: {deliver_err}", exc_info=True)
+        try:
+            await client.send_message(
+                user_id,
+                f"**AI Delivery Error:**\n\nFailed to deliver output file: `{str(deliver_err)}`",
+                buttons=build_ai_session_menu(task_id)
+            )
+        except Exception:
+            pass
     finally:
         task_ctx.is_processing = False
         task_ctx.ai_session_active = True

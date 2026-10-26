@@ -101,6 +101,12 @@ def create_bot_client() -> TelegramClient:
             from bot.task_manager import task_manager
 
             active_task = task_manager.get_active_ai_task_for_user(event.sender_id)
+            if not active_task:
+                latest_task = task_manager.get_latest_task_for_user(event.sender_id)
+                if latest_task and latest_task.input_path and latest_task.meta:
+                    latest_task.ai_session_active = True
+                    latest_task.ai_workplace_dir = settings.get_ai_workplace(latest_task.user_id, latest_task.task_id)
+                    active_task = latest_task
 
             # Avoid taking new input while AI is processing or thinking
             if active_task and active_task.is_processing:
@@ -126,6 +132,12 @@ def create_bot_client() -> TelegramClient:
                 if active_task:
                     from bot.ai_handler import handle_ai_user_text
                     await handle_ai_user_text(event, active_task, client)
+                else:
+                    await event.reply(
+                        "**AI Video Assistant**\n\n"
+                        "Please upload or forward a video file first.\n"
+                        "Once uploaded, tell me what you want to do (e.g., compress, convert, edit, mute, or fix lag) and I will execute it for you."
+                    )
         except Exception as e:
             logger.error("Unhandled exception in _media_or_text: %s", e, exc_info=True)
 
