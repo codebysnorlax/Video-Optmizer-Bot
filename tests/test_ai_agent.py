@@ -789,7 +789,7 @@ async def test_safe_tool_executor_resolution_and_quality_guardrails(tmp_path):
         )
         assert len(captured_cmds) == 1
         vf_idx = captured_cmds[0].index("-vf")
-        assert captured_cmds[0][vf_idx + 1] == "scale=1080:-2"
+        assert captured_cmds[0][vf_idx + 1].startswith("scale=1080:-2")
 
         # 2. Unauthorized 480p downscaling MUST be clamped to 1080p
         await executor.run_execute_ffmpeg(

@@ -47,6 +47,10 @@ class TaskContext:
         if self.last_activity_time == 0.0:
             self.last_activity_time = time.time()
 
+    def touch(self) -> None:
+        """Updates last_activity_time to current timestamp."""
+        self.last_activity_time = time.time()
+
     def get_assets(self) -> Dict[str, Any]:
         """Returns registered session assets, initializing v1 from input_path if needed."""
         if self.assets is None:
@@ -291,8 +295,8 @@ class TaskManager:
             asyncio.create_task(self._notify_queue_positions())
 
     async def _idle_session_reaper(self, bot_client=None) -> None:
-        """Background coroutine that reaps AI sessions idle for >30 minutes."""
-        IDLE_TIMEOUT = 1800  # 30 minutes
+        """Background coroutine that reaps AI sessions idle for > AI_SESSION_IDLE_TIMEOUT."""
+        IDLE_TIMEOUT = getattr(settings, "AI_SESSION_IDLE_TIMEOUT", 3600)
         CHECK_INTERVAL = 60  # check every 60 seconds
 
         while True:
@@ -302,13 +306,40 @@ class TaskManager:
                 tasks_to_reap = []
 
                 for task_id, task_ctx in list(self._active_tasks.items()):
+                    # NEVER reap tasks that are currently busy or actively encoding/uploading/downloading/processing
+                    is_busy = (
+                        task_ctx.is_processing
+                        or (hasattr(task_ctx, "_processing_lock") and task_ctx._processing_lock.locked())
+                        or task_ctx.current_process is not None
+                        or (task_ctx.active_async_task is not None and not task_ctx.active_async_task.done())
+                        or task_ctx.current_stage not in ("idle", "")
+                        or task_id in self._active_encoders
+                    )
+                    if is_busy:
+                        task_ctx.touch()
+                        continue
+
                     if (task_ctx.ai_session_active and
                             now - task_ctx.last_activity_time > IDLE_TIMEOUT):
                         tasks_to_reap.append((task_id, task_ctx))
 
                 for task_id, task_ctx in tasks_to_reap:
+                    # Double-check busy status right before cleanup
+                    is_busy = (
+                        task_ctx.is_processing
+                        or (hasattr(task_ctx, "_processing_lock") and task_ctx._processing_lock.locked())
+                        or task_ctx.current_process is not None
+                        or (task_ctx.active_async_task is not None and not task_ctx.active_async_task.done())
+                        or task_ctx.current_stage not in ("idle", "")
+                        or task_id in self._active_encoders
+                    )
+                    if is_busy:
+                        task_ctx.touch()
+                        continue
+
                     user_id = task_ctx.user_id
-                    logger.info(f"Idle session reaper: cleaning up session for user {user_id}, task {task_id}")
+                    timeout_mins = int(IDLE_TIMEOUT // 60)
+                    logger.info(f"Idle session reaper: cleaning up session for user {user_id}, task {task_id} (inactive for {int(now - task_ctx.last_activity_time)}s)")
 
                     # (a) Deactivate session
                     task_ctx.ai_session_active = False
@@ -316,7 +347,7 @@ class TaskManager:
                     # (b) Clear agent reference
                     task_ctx.ai_agent = None
 
-                    # (c) Clean workspace
+                    # (c) Clean workplace
                     try:
                         settings.clean_ai_workplace(user_id, task_id)
                     except Exception as e:
@@ -334,7 +365,7 @@ class TaskManager:
                         try:
                             await bot_client.send_message(
                                 user_id,
-                                "**AI session timed out after 30 minutes of inactivity.**\n"
+                                f"**AI session timed out after {timeout_mins} minutes of inactivity.**\n"
                                 "Your session has been cleaned up to free resources. "
                                 "You can start a new AI session anytime by sending a video."
                             )

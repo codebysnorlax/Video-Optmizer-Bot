@@ -132,6 +132,7 @@ async def get_or_restore_task_ctx(task_id: str, event: events.CallbackQuery.Even
                 task_ctx.ai_agent = await restore_ai_session(task_ctx, client)
             except Exception as e:
                 logger.debug(f"Could not restore ai_agent on existing task_ctx: {e}")
+        task_ctx.touch()
         return task_ctx
 
     cache = await get_file_cache(task_id)
@@ -175,6 +176,7 @@ async def get_or_restore_task_ctx(task_id: str, event: events.CallbackQuery.Even
                 task_ctx.ai_agent = await restore_ai_session(task_ctx, client)
         except Exception as e:
             logger.debug(f"Could not restore ai_session from persistence: {e}")
+        task_ctx.touch()
         return task_ctx
     except Exception as e:
         logger.error(f"Failed to restore task context for {task_id}: {e}")

@@ -252,6 +252,7 @@ async def handle_incoming_session_asset(event: events.NewMessage.Event, task_ctx
     start_time = time.time()
 
     async def download_progress(current_bytes: int, total_bytes: int):
+        task_ctx.touch()
         text = format_progress_status(
             action_label=f"**Downloading {media_type.capitalize()} for AI Session:**",
             current_bytes=current_bytes,
@@ -267,6 +268,7 @@ async def handle_incoming_session_asset(event: events.NewMessage.Event, task_ctx
             out_path=save_path,
             progress_callback=download_progress
         )
+        task_ctx.touch()
         await updater.update(f"**Analyzing {media_type} streams with FFprobe...**\n`{display_name}`", force=True)
         meta = await probe_media(save_path)
         asset_key = task_ctx.add_asset(save_path, meta=meta, media_type=media_type)

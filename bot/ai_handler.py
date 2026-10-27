@@ -91,6 +91,7 @@ async def restore_ai_session(task_ctx, client) -> Optional[VideoAIAgent]:
         agent.turn_counter = len(user_msgs)
 
         logger.info(f"Successfully restored AI session for user={task_ctx.user_id}, task={task_ctx.task_id} with {len(history)} messages.")
+        task_ctx.touch()
         return agent
     except Exception as e:
         logger.error(f"Error restoring AI session: {e}", exc_info=True)
@@ -99,6 +100,7 @@ async def restore_ai_session(task_ctx, client) -> Optional[VideoAIAgent]:
 
 async def handle_ai_session_start(event, task_ctx, client) -> None:
     """Initializes and displays the AI Manual greeting and interactive session."""
+    task_ctx.touch()
     if not settings.OPENROUTER_API_KEY:
         await event.answer(
             "OpenRouter API key is not configured in .env!\nPlease set OPENROUTER_API_KEY to activate AI Manual features.",
@@ -161,6 +163,7 @@ async def handle_ai_session_start(event, task_ctx, client) -> None:
 
 async def handle_ai_quick_prompt(event, preset: str, task_ctx, client) -> None:
     """Handles preset one-tap prompt buttons if triggered."""
+    task_ctx.touch()
     prompt_map = {
         "split": "Separate this video into two distinct deliverables: a muted video track and an extracted MP3 audio track, and deliver both.",
         "extract_audio": "Extract the audio track from this video as an MP3 audio file.",
@@ -176,6 +179,7 @@ async def handle_ai_quick_prompt(event, preset: str, task_ctx, client) -> None:
 
 async def handle_ai_user_text(event, task_ctx, client) -> None:
     """Handles incoming natural language chat messages directed to an active AI session."""
+    task_ctx.touch()
     user_text = event.raw_text.strip()
     if not user_text:
         return
@@ -198,6 +202,7 @@ async def handle_ai_user_text(event, task_ctx, client) -> None:
 
 async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> None:
     """Executes an AI reasoning turn with live progress reporting and directs output to transcode or diagnosis."""
+    task_ctx.touch()
     task_id = task_ctx.task_id
     user_id = task_ctx.user_id
 
@@ -260,6 +265,7 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
         updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
 
         async def transcode_progress(percent: float, speed: str, eta: int, fps: float, step_label: Optional[str] = None, stalled: bool = False, **kwargs):
+            task_ctx.touch()
             if task_ctx.is_cancelled:
                 if task_ctx.current_process:
                     try:
@@ -558,6 +564,7 @@ async def deliver_ai_results(
                 pass
 
             async def upload_progress(current_bytes: int, total_bytes: int):
+                task_ctx.touch()
                 if task_ctx.is_cancelled:
                     raise asyncio.CancelledError()
                 percent = (current_bytes / total_bytes * 100) if total_bytes > 0 else 0
@@ -690,6 +697,7 @@ async def deliver_ai_results(
     finally:
         task_ctx.is_processing = False
         task_ctx.ai_session_active = True
+        task_ctx.touch()
 
 
 async def deliver_ai_output(task_ctx, plan_title: str, out_path: Path, status_msg, client) -> None:

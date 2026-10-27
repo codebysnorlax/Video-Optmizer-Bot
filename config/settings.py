@@ -44,6 +44,9 @@ class Settings:
     DEFAULT_AUDIO_BITRATE: str = os.getenv("DEFAULT_AUDIO_BITRATE", "128k")
     MAX_VIDEO_BITRATE: str = os.getenv("MAX_VIDEO_BITRATE", "6000k")
 
+    # AI Session Timeout (seconds of inactivity before reaping idle session, default 60 mins)
+    AI_SESSION_IDLE_TIMEOUT: int = int(os.getenv("AI_SESSION_IDLE_TIMEOUT", "3600"))
+
     def ensure_directories(self) -> None:
         """Create necessary directories if they don't exist."""
         self.DOWNLOAD_DIR.mkdir(parents=True, exist_ok=True)

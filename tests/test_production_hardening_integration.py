@@ -338,3 +338,153 @@ async def test_12_3_multi_bug_regression_all_7_fixes(tmp_path):
     t_ctx.ai_session_active = False
     # File must still exist!
     assert test_inter.exists()
+
+
+@pytest.mark.asyncio
+async def test_idle_session_reaper_busy_guard(tmp_path):
+    """
+    Verifies that the idle session reaper NEVER reaps sessions that are actively processing
+    or holding locks, even if last_activity_time is older than IDLE_TIMEOUT.
+    """
+    from bot.task_manager import task_manager
+    user_id = 88881
+    task_id = "task_reap_busy"
+
+    dummy_input = tmp_path / "busy_input.mp4"
+    dummy_input.write_bytes(b"dummy")
+
+    t_ctx = TaskContext(
+        task_id=task_id,
+        user_id=user_id,
+        input_path=dummy_input,
+        output_path=None,
+        meta=None,
+        status_message=AsyncMock(),
+        original_message_id=404,
+        ai_session_active=True,
+        last_activity_time=time.time() - 7200  # 2 hours ago
+    )
+
+    workplace = settings.get_ai_workplace(user_id, task_id)
+    test_file = workplace / "encoding_in_progress.mp4"
+    test_file.write_bytes(b"transcode data")
+
+    task_manager.register_task(t_ctx)
+
+    # 1. Mark task as busy (e.g. is_processing = True)
+    t_ctx.is_processing = True
+
+    # Run one pass of the reaper logic
+    now = time.time()
+    IDLE_TIMEOUT = getattr(settings, "AI_SESSION_IDLE_TIMEOUT", 3600)
+    tasks_to_reap = []
+
+    for tid, ctx in list(task_manager._active_tasks.items()):
+        if tid == task_id:
+            is_busy = (
+                ctx.is_processing
+                or (hasattr(ctx, "_processing_lock") and ctx._processing_lock.locked())
+                or ctx.current_process is not None
+                or (ctx.active_async_task is not None and not ctx.active_async_task.done())
+                or ctx.current_stage not in ("idle", "")
+                or tid in task_manager._active_encoders
+            )
+            if is_busy:
+                ctx.touch()
+                continue
+            if ctx.ai_session_active and now - ctx.last_activity_time > IDLE_TIMEOUT:
+                tasks_to_reap.append((tid, ctx))
+
+    assert len(tasks_to_reap) == 0
+    assert test_file.exists(), "Workplace was deleted while task was busy!"
+    assert t_ctx.last_activity_time >= now - 1.0, "Busy task last_activity_time was not touched!"
+
+    # 2. Now unmark busy -> task becomes truly idle
+    t_ctx.is_processing = False
+    t_ctx.last_activity_time = now - 7200  # Simulate 2 hours idle
+
+    tasks_to_reap_idle = []
+    for tid, ctx in list(task_manager._active_tasks.items()):
+        if tid == task_id:
+            is_busy = (
+                ctx.is_processing
+                or (hasattr(ctx, "_processing_lock") and ctx._processing_lock.locked())
+                or ctx.current_process is not None
+                or (ctx.active_async_task is not None and not ctx.active_async_task.done())
+                or ctx.current_stage not in ("idle", "")
+                or tid in task_manager._active_encoders
+            )
+            if is_busy:
+                ctx.touch()
+                continue
+            if ctx.ai_session_active and now - ctx.last_activity_time > IDLE_TIMEOUT:
+                tasks_to_reap_idle.append((tid, ctx))
+
+    assert len(tasks_to_reap_idle) == 1
+    task_manager.remove_task(task_id)
+
+
+@pytest.mark.asyncio
+async def test_gpu_hardware_acceleration_in_safe_tool_executor(tmp_path):
+    """
+    Verifies that SafeToolExecutor executes with GPU acceleration when available,
+    and falls back to CPU libx264 software encoding if hardware encoding fails.
+    """
+    from core.ai.tools import SafeToolExecutor
+    from core.hardware import current_hardware
+
+    user_id = 77771
+    task_id = "task_hw_test"
+    dummy_input = tmp_path / "hw_input.mp4"
+    dummy_input.write_bytes(b"dummy_input")
+
+    dummy_meta = MediaMetadata(
+        file_path=dummy_input,
+        file_name="hw_input.mp4",
+        file_size_bytes=5000000,
+        duration_seconds=12.0,
+        container_format="mp4",
+        has_video=True,
+        video_codec="h264",
+        width=1280,
+        height=720,
+        fps=30.0,
+        video_bitrate_kbps=2500,
+        has_audio=True,
+        audio_codec="aac",
+        audio_channels=2,
+        audio_sample_rate=44100,
+        audio_bitrate_kbps=128,
+        overall_bitrate_kbps=2628,
+        is_high_bitrate=False,
+        raw_info={}
+    )
+
+    executor = SafeToolExecutor(user_id, task_id, dummy_input, meta=dummy_meta)
+
+    # Simulate GPU fail on first attempt, succeed on CPU fallback
+    calls = []
+    async def mock_run_ffmpeg(cmd, total_duration_seconds, progress_callback=None, on_process_started=None):
+        cmd_str = " ".join(cmd)
+        calls.append(cmd_str)
+        if "h264_vaapi" in cmd_str or "h264_nvenc" in cmd_str:
+            raise RuntimeError("Simulated GPU Driver Error")
+        out_p = Path(cmd[-1])
+        out_p.write_bytes(b"cpu_fallback_output_data")
+
+    with patch("core.ai.tools.run_ffmpeg_with_progress", side_effect=mock_run_ffmpeg), \
+         patch("core.ai.tools.probe_media", AsyncMock(return_value=dummy_meta)):
+
+        res = await executor.run_execute_ffmpeg(
+            plan_title="GPU Transcode Test",
+            output_filename="gpu_out.mp4",
+            video_codec="libx264"
+        )
+
+        assert res["status"] == "success"
+        if current_hardware.hwaccel_type in ("vaapi", "nvenc"):
+            # Verify both GPU attempt and CPU fallback were recorded
+            assert len(calls) == 2
+            assert any("h264_vaapi" in c or "h264_nvenc" in c for c in calls)
+            assert any("libx264" in c for c in calls)
+

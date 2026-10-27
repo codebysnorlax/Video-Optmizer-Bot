@@ -713,12 +713,13 @@ class SafeToolExecutor:
                     op_vf = re.sub(r'scale=(?:480|360):[^,:]+', safe_scale, op_vf)
                     op_vf = re.sub(r',+', ',', op_vf).strip(",").strip()
 
-            # Assemble FFmpeg Command
-            cmd = []
+            # Assemble Inputs
+            inputs_args = []
             for p in resolved_inputs:
-                cmd.extend(["-i", str(p)])
+                inputs_args.extend(["-i", str(p)])
 
             # Stream Mapping
+            stream_map_args = []
             raw_sm = op.get("stream_mapping")
             sm_list = _normalize_string_or_list(raw_sm)
             if sm_list:
@@ -729,12 +730,12 @@ class SafeToolExecutor:
                         if i + 1 < len(sm_list):
                             clean_target = sm_list[i + 1].strip().strip("'\"")
                             if clean_target and clean_target != "-map":
-                                cmd.extend(["-map", clean_target])
+                                stream_map_args.extend(["-map", clean_target])
                             i += 2
                         else:
                             i += 1
                     elif token:
-                        cmd.extend(["-map", token])
+                        stream_map_args.extend(["-map", token])
                         i += 1
             elif len(resolved_inputs) == 2:
                 # Auto stream mapping when combining 2 inputs (e.g. video + audio)
@@ -742,38 +743,16 @@ class SafeToolExecutor:
                     p0_meta = await probe_media(resolved_inputs[0])
                     p1_meta = await probe_media(resolved_inputs[1])
                     if p0_meta and p0_meta.has_video and p1_meta and p1_meta.has_audio:
-                        cmd.extend(["-map", "0:v:0", "-map", "1:a:0"])
+                        stream_map_args.extend(["-map", "0:v:0", "-map", "1:a:0"])
                     elif p1_meta and p1_meta.has_video and p0_meta and p0_meta.has_audio:
-                        cmd.extend(["-map", "1:v:0", "-map", "0:a:0"])
+                        stream_map_args.extend(["-map", "1:v:0", "-map", "0:a:0"])
                 except Exception:
                     pass
 
-            # Video Stream Handling
-            if op_extract_audio:
-                cmd.append("-vn")
-            else:
-                vcodec = op.get("video_codec", "libx264")
-                if len(resolved_inputs) == 2 and not (op_vf and op_vf.strip()):
-                    # When combining new audio into an already-encoded video without extra filters, stream copy video
-                    vcodec = "copy"
-                elif op_mute_video and vcodec == "libx264" and (not op_vf or not op_vf.strip()):
-                    vcodec = "copy"
-                if op_vf and op_vf.strip():
-                    cmd.extend(["-vf", op_vf.strip()])
-                if vcodec == "copy":
-                    cmd.extend(["-c:v", "copy"])
-                elif vcodec != "none":
-                    cmd.extend(["-c:v", vcodec])
-                    if current_hardware.is_termux:
-                        cmd.extend(["-preset", "veryfast", "-tune", "zerolatency"])
-                    else:
-                        cmd.extend(["-preset", "fast"])
-                    op_crf = op.get("crf", 22)
-                    cmd.extend(["-crf", str(op_crf), "-pix_fmt", "yuv420p", "-threads", str(current_hardware.cpu_cores)])
-
             # Audio Stream Handling
+            audio_args = []
             if op_mute_video:
-                cmd.append("-an")
+                audio_args.append("-an")
             else:
                 acodec = op.get("audio_codec", "aac")
                 if safe_filename.lower().endswith(".mp3") and acodec == "aac":
@@ -787,35 +766,83 @@ class SafeToolExecutor:
                         loop_count = m.group(1) if m else "-1"
                         pattern = r'arepeat(?:=[^\',;]*(?:\'[^\']*\')*[^\',;]*|:[^\',;]*(?:\'[^\']*\')*[^\',;]*)?'
                         clean_af = re.sub(pattern, f'aloop=loop={loop_count}:size=2e+09', clean_af)
-                    cmd.extend(["-af", clean_af])
+                    audio_args.extend(["-af", clean_af])
                     if acodec == "copy":
                         acodec = "aac"
                 if acodec == "copy":
-                    cmd.extend(["-c:a", "copy"])
+                    audio_args.extend(["-c:a", "copy"])
                 elif acodec == "aac":
-                    cmd.extend(["-c:a", "aac", "-b:a", "128k", "-ac", "2"])
+                    audio_args.extend(["-c:a", "aac", "-b:a", "128k", "-ac", "2"])
                 elif acodec in ("mp3", "libmp3lame"):
-                    cmd.extend(["-c:a", "libmp3lame", "-b:a", "192k"])
+                    audio_args.extend(["-c:a", "libmp3lame", "-b:a", "192k"])
 
             # Extra safe arguments (e.g. -shortest, -ss, -to)
+            extra_args = []
             has_shortest = False
             raw_ea = op.get("extra_args")
             ea_list = _normalize_string_or_list(raw_ea)
             for ea in ea_list:
                 ea_clean = ea.strip().strip("'\"")
                 if ea_clean:
-                    cmd.append(ea_clean)
+                    extra_args.append(ea_clean)
                     if ea_clean == "-shortest":
                         has_shortest = True
 
             if len(resolved_inputs) >= 2 and not has_shortest and not op_extract_audio:
-                cmd.append("-shortest")
+                extra_args.append("-shortest")
 
             # Faststart for web streaming containers
             if safe_filename.endswith((".mp4", ".mov", ".m4v", ".m4a")):
-                cmd.extend(["-movflags", "+faststart"])
+                extra_args.extend(["-movflags", "+faststart"])
 
-            cmd.append(str(out_path))
+            # Video Stream Handling & GPU Hardware Acceleration
+            vcodec = op.get("video_codec", "libx264")
+            if len(resolved_inputs) == 2 and not (op_vf and op_vf.strip()):
+                vcodec = "copy"
+            elif op_mute_video and vcodec == "libx264" and (not op_vf or not op_vf.strip()):
+                vcodec = "copy"
+
+            cmd_hw = None
+            cmd_cpu = []
+
+            if op_extract_audio:
+                cmd_cpu = [*inputs_args, *stream_map_args, "-vn", *audio_args, *extra_args, str(out_path)]
+            elif vcodec == "copy":
+                cmd_cpu = [*inputs_args, *stream_map_args, "-c:v", "copy", *audio_args, *extra_args, str(out_path)]
+            elif vcodec == "none":
+                cmd_cpu = [*inputs_args, *stream_map_args, "-vn", *audio_args, *extra_args, str(out_path)]
+            else:
+                op_crf = op.get("crf", 22)
+
+                # 1. CPU Software Command (libx264)
+                cpu_v_args = []
+                if op_vf and op_vf.strip():
+                    cpu_v_args.extend(["-vf", op_vf.strip()])
+                cpu_v_args.extend(["-c:v", "libx264"])
+                if current_hardware.is_termux:
+                    cpu_v_args.extend(["-preset", "veryfast", "-tune", "zerolatency"])
+                else:
+                    cpu_v_args.extend(["-preset", "fast"])
+                cpu_v_args.extend(["-crf", str(op_crf), "-pix_fmt", "yuv420p", "-threads", str(current_hardware.cpu_cores)])
+                cmd_cpu = [*inputs_args, *stream_map_args, *cpu_v_args, *audio_args, *extra_args, str(out_path)]
+
+                # 2. Hardware Accelerated Command (if GPU is available)
+                if current_hardware.hwaccel_type == "vaapi" and current_hardware.hwaccel_device:
+                    hw_init = ["-init_hw_device", f"vaapi=va:{current_hardware.hwaccel_device}", "-filter_hw_device", "va"]
+                    if op_vf and op_vf.strip():
+                        clean_vf = op_vf.strip().rstrip(",")
+                        hw_vf = f"{clean_vf},format=nv12,hwupload"
+                    else:
+                        hw_vf = "format=nv12,hwupload"
+                    hw_v_args = ["-vf", hw_vf, "-c:v", "h264_vaapi", "-qp", str(op_crf)]
+                    cmd_hw = [*hw_init, *inputs_args, *stream_map_args, *hw_v_args, *audio_args, *extra_args, str(out_path)]
+
+                elif current_hardware.hwaccel_type == "nvenc":
+                    hw_v_args = []
+                    if op_vf and op_vf.strip():
+                        hw_v_args.extend(["-vf", op_vf.strip()])
+                    hw_v_args.extend(["-c:v", "h264_nvenc", "-preset", "p4", "-cq", str(op_crf), "-pix_fmt", "yuv420p"])
+                    cmd_hw = [*inputs_args, *stream_map_args, *hw_v_args, *audio_args, *extra_args, str(out_path)]
 
             # Duration estimation for progress bar
             est_duration = 0.0
@@ -843,7 +870,8 @@ class SafeToolExecutor:
                     except Exception as pe:
                         logger.warning(f"Error in op_progress callback: {pe}")
 
-            cmd_str = " ".join(cmd)
+            cmd_to_run = cmd_hw if cmd_hw else cmd_cpu
+            cmd_str = " ".join(cmd_to_run)
             executed_commands.append(cmd_str)
 
             # Adjust estimated duration by speed factor if slowing down or speeding up
@@ -851,21 +879,52 @@ class SafeToolExecutor:
             if cmd_speed_mult and cmd_speed_mult > 0:
                 est_duration = est_duration * cmd_speed_mult
 
+            cmd_used = cmd_to_run
             try:
+                if cmd_hw:
+                    logger.info(f"Running GPU accelerated FFmpeg: {cmd_str}")
+                else:
+                    logger.info(f"Running CPU FFmpeg: {cmd_str}")
                 await run_ffmpeg_with_progress(
-                    cmd=cmd,
+                    cmd=cmd_to_run,
                     total_duration_seconds=est_duration,
                     progress_callback=op_progress if progress_callback else None,
                     on_process_started=on_process_started
                 )
             except Exception as e:
-                logger.error(f"Sandbox FFmpeg execution failed for {safe_filename}: {e}")
-                return {
-                    "status": "error",
-                    "error": f"FFmpeg execution failed on {safe_filename}: {str(e)}",
-                    "executed_commands": executed_commands,
-                    "ffmpeg_command": cmd_str
-                }
+                if cmd_hw:
+                    logger.warning(f"GPU hardware acceleration failed for {safe_filename} ({e}). Retrying with multi-threaded CPU libx264...")
+                    if out_path.exists():
+                        try:
+                            out_path.unlink()
+                        except Exception:
+                            pass
+                    cpu_cmd_str = " ".join(cmd_cpu)
+                    executed_commands.append(cpu_cmd_str)
+                    cmd_used = cmd_cpu
+                    try:
+                        await run_ffmpeg_with_progress(
+                            cmd=cmd_cpu,
+                            total_duration_seconds=est_duration,
+                            progress_callback=op_progress if progress_callback else None,
+                            on_process_started=on_process_started
+                        )
+                    except Exception as cpu_err:
+                        logger.error(f"CPU software fallback failed for {safe_filename}: {cpu_err}")
+                        return {
+                            "status": "error",
+                            "error": f"FFmpeg execution failed on {safe_filename}: {str(cpu_err)}",
+                            "executed_commands": executed_commands,
+                            "ffmpeg_command": cpu_cmd_str
+                        }
+                else:
+                    logger.error(f"Sandbox FFmpeg execution failed for {safe_filename}: {e}")
+                    return {
+                        "status": "error",
+                        "error": f"FFmpeg execution failed on {safe_filename}: {str(e)}",
+                        "executed_commands": executed_commands,
+                        "ffmpeg_command": cmd_str
+                    }
 
             if not out_path.exists() or out_path.stat().st_size == 0:
                 return {
@@ -923,7 +982,7 @@ class SafeToolExecutor:
                 is_valid, error_msg, warnings = validate_output(
                     input_meta=actual_in_meta,
                     output_meta=out_meta,
-                    ffmpeg_cmd_str=cmd_str,
+                    ffmpeg_cmd_str=" ".join(cmd_used),
                     plan_title=plan_title
                 )
                 if not is_valid:
@@ -933,7 +992,7 @@ class SafeToolExecutor:
                         if out_path.exists():
                             out_path.unlink()
                         await run_ffmpeg_with_progress(
-                            cmd=cmd,
+                            cmd=cmd_used,
                             total_duration_seconds=est_duration,
                             progress_callback=op_progress if progress_callback else None,
                             on_process_started=on_process_started
@@ -955,7 +1014,7 @@ class SafeToolExecutor:
                     is_valid2, error_msg2, warnings2 = validate_output(
                         input_meta=actual_in_meta,
                         output_meta=retry_meta,
-                        ffmpeg_cmd_str=cmd_str,
+                        ffmpeg_cmd_str=" ".join(cmd_used),
                         plan_title=plan_title
                     )
                     if not is_valid2:

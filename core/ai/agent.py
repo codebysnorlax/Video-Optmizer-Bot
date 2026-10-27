@@ -282,6 +282,7 @@ class VideoAIAgent:
         host_info = (
             f"- Host OS: {current_hardware.os_name} ({current_hardware.arch})\n"
             f"- Platform: {current_hardware.description}\n"
+            f"- GPU / Video Encoder: {current_hardware.video_encoder}\n"
             f"- CPU Cores: {current_hardware.cpu_cores}\n"
             f"- Available RAM: ~{current_hardware.available_ram_mb} MB"
         )
@@ -536,8 +537,14 @@ class VideoAIAgent:
 
                     preview_parts = [f"AI Plan: {plan_title}"]
                     if codec and codec != "none":
-                        crf_str = f" CRF {crf_val}" if crf_val else ""
-                        preview_parts.append(f"Codec: {codec}{crf_str}")
+                        if codec == "copy":
+                            preview_parts.append("Codec: copy (Passthrough)")
+                        else:
+                            crf_str = f" CRF {crf_val}" if crf_val else ""
+                            if current_hardware.hwaccel_type in ("vaapi", "nvenc"):
+                                preview_parts.append(f"Codec: {codec}{crf_str} (GPU: {current_hardware.video_encoder})")
+                            else:
+                                preview_parts.append(f"Codec: {codec}{crf_str}")
                     if resolution:
                         preview_parts.append(f"Resolution: {resolution}")
                     if est_time:
