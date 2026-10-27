@@ -75,7 +75,11 @@ async def main() -> None:
 
     print(f"\n{BOLD_GREEN}>>> Bot is online and listening for videos as @{me.username} <<<{RESET}\n", flush=True)
 
-    # 5. Run bot loop until disconnected
+    # 6. Start background idle session reaper
+    from bot.task_manager import task_manager
+    task_manager.start_idle_reaper(bot_client=client)
+
+    # 7. Run bot loop until disconnected
     await client.run_until_disconnected()
 
 

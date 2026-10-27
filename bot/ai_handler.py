@@ -36,10 +36,65 @@ from database.models import (
     record_task_complete,
     record_task_failed,
     register_file_cache,
-    get_user_ai_model
+    get_user_ai_model,
+    load_ai_session,
+    save_ai_session,
+    delete_ai_session
 )
 
 logger = logging.getLogger(__name__)
+
+
+async def restore_ai_session(task_ctx, client) -> Optional[VideoAIAgent]:
+    """
+    Restores a persisted AI session from SQLite if available.
+    Validates input_path existence on disk; if missing, alerts user and returns None.
+    """
+    try:
+        session = await load_ai_session(task_ctx.user_id, task_ctx.task_id)
+        if not session:
+            return None
+
+        raw_input = session.get("input_path")
+        input_path = Path(raw_input) if raw_input else None
+        if not input_path or not input_path.exists():
+            logger.warning(f"Persisted input path does not exist: {input_path}")
+            if client:
+                try:
+                    await client.send_message(
+                        task_ctx.user_id,
+                        "Your previous video file is no longer available on the server. Please send the video again to start a new AI session."
+                    )
+                except Exception as msg_err:
+                    logger.debug(f"Failed to send missing file notice: {msg_err}")
+            return None
+
+        pref_model = session.get("preferred_model") or await get_user_ai_model(task_ctx.user_id)
+        history = session.get("history") or []
+        assets = session.get("assets") or {}
+
+        # Re-resolve any Path objects in assets
+        for aid, a in assets.items():
+            if "filepath" in a and isinstance(a["filepath"], str):
+                a["filepath"] = Path(a["filepath"])
+
+        agent = VideoAIAgent(
+            user_id=task_ctx.user_id,
+            task_id=task_ctx.task_id,
+            input_path=input_path,
+            meta=task_ctx.meta,
+            preferred_model=pref_model,
+            assets=assets
+        )
+        agent.history = history
+        user_msgs = [m for m in history if m.get("role") == "user"]
+        agent.turn_counter = len(user_msgs)
+
+        logger.info(f"Successfully restored AI session for user={task_ctx.user_id}, task={task_ctx.task_id} with {len(history)} messages.")
+        return agent
+    except Exception as e:
+        logger.error(f"Error restoring AI session: {e}", exc_info=True)
+        return None
 
 
 async def handle_ai_session_start(event, task_ctx, client) -> None:
@@ -57,16 +112,20 @@ async def handle_ai_session_start(event, task_ctx, client) -> None:
     # Fetch user's preferred model
     active_model = await get_user_ai_model(user_id)
 
-    # Create agent if needed
+    # Create or restore agent if needed
     if not task_ctx.ai_agent or task_ctx.ai_agent.preferred_model != active_model:
-        task_ctx.ai_agent = VideoAIAgent(
-            user_id=user_id,
-            task_id=task_id,
-            input_path=task_ctx.input_path,
-            meta=task_ctx.meta,
-            preferred_model=active_model,
-            assets=task_ctx.get_assets()
-        )
+        restored = await restore_ai_session(task_ctx, client)
+        if restored:
+            task_ctx.ai_agent = restored
+        else:
+            task_ctx.ai_agent = VideoAIAgent(
+                user_id=user_id,
+                task_id=task_id,
+                input_path=task_ctx.input_path,
+                meta=task_ctx.meta,
+                preferred_model=active_model,
+                assets=task_ctx.get_assets()
+            )
     else:
         task_ctx.ai_agent.assets = task_ctx.get_assets()
         task_ctx.ai_agent.tool_executor.assets = task_ctx.get_assets()
@@ -121,7 +180,7 @@ async def handle_ai_user_text(event, task_ctx, client) -> None:
     if not user_text:
         return
 
-    if task_ctx.is_processing:
+    if task_ctx._processing_lock.locked():
         try:
             await event.reply(
                 "**AI is currently busy processing a task.**\n"
@@ -142,154 +201,186 @@ async def execute_ai_query(user_prompt: str, task_ctx, status_msg, client) -> No
     task_id = task_ctx.task_id
     user_id = task_ctx.user_id
 
-    task_ctx.is_processing = True
-    task_ctx.is_cancelled = False
-    start_time = time.time()
-
-    # Display initial thinking status
-    try:
-        await status_msg.edit(
-            f"**AI Video Engineer is analyzing your request...**\n\n_\"{user_prompt[:80]}...\"_",
-            buttons=None
-        )
-    except Exception:
-        pass
-
-    # Ensure agent is initialized with user's model
-    active_model = await get_user_ai_model(user_id)
-    if not task_ctx.ai_agent or task_ctx.ai_agent.preferred_model != active_model:
-        task_ctx.ai_agent = VideoAIAgent(
-            user_id=user_id,
-            task_id=task_id,
-            input_path=task_ctx.input_path,
-            meta=task_ctx.meta,
-            preferred_model=active_model,
-            assets=task_ctx.get_assets()
-        )
-    else:
-        task_ctx.ai_agent.assets = task_ctx.get_assets()
-        task_ctx.ai_agent.tool_executor.assets = task_ctx.get_assets()
-        task_ctx.ai_agent.input_path = task_ctx.input_path
-        task_ctx.ai_agent.meta = task_ctx.meta
-        task_ctx.ai_agent.tool_executor.input_path = task_ctx.input_path
-        task_ctx.ai_agent.tool_executor.meta = task_ctx.meta
-
-    updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
-
-    async def transcode_progress(percent: float, speed: str, eta: int, fps: float, step_label: Optional[str] = None):
-        if task_ctx.is_cancelled:
-            if task_ctx.current_process:
-                try:
-                    task_ctx.current_process.kill()
-                except Exception:
-                    pass
-            raise asyncio.CancelledError()
-        bar = make_progress_bar(percent)
-        step_line = f"• **Operation:** `{step_label}`\n" if step_label else ""
-        text = (
-            f"**AI Transcoding in Progress...**\n\n"
-            f"{step_line}"
-            f"• **Progress:** {bar}\n"
-            f"• **Speed:** `{speed}` | **FPS:** `{fps:.1f}`\n"
-            f"• **ETA:** `{eta}s`\n"
-            f"• **Engine:** `{current_hardware.description}`\n"
-            f"• **Sandbox:** `storage/Ai_Workplace/{user_id}_{task_id}/`"
-        )
-        is_initial = (percent == 0.0 or speed in ("init", "starting"))
-        await updater.update(text, force=is_initial, buttons=build_task_progress_menu(task_id))
-
-    try:
-        result = await task_ctx.ai_agent.process_message(
-            user_prompt,
-            progress_callback=transcode_progress,
-            on_process_started=lambda p: setattr(task_ctx, "current_process", p)
-        )
-    except Exception as e:
-        logger.error(f"Error during AI reasoning turn: {e}", exc_info=True)
-        task_ctx.is_processing = False
-        await status_msg.edit(
-            f"**AI Processing Error:**\n\n{str(e)}\n\nPlease try again or rephrase your request.",
-            buttons=build_ai_session_menu(task_id)
-        )
-        return
-
-    # 1. Error Response
-    if result.get("status") == "error":
-        err_text = result.get("error", "Unknown error")
-        task_ctx.is_processing = False
-        formatted_err = f"**AI Operation Failed**\n\n• **Reason:** `{err_text}`\n\nYou can rephrase your request or try again below:"
-        sent = False
+    if task_ctx._processing_lock.locked():
         try:
-            await status_msg.edit(formatted_err, buttons=build_ai_session_menu(task_id))
-            sent = True
+            await status_msg.edit(
+                "**AI is currently busy processing a task.**\n"
+                "Please wait for the current operation to finish before sending new instructions.",
+                buttons=build_ai_session_menu(task_id)
+            )
         except Exception:
             pass
-        if not sent:
+        return
+
+    async with task_ctx._processing_lock:
+        task_ctx.is_cancelled = False
+        start_time = time.time()
+
+        # Record AI manual mode task start
+        try:
+            file_name = task_ctx.input_path.name if task_ctx.input_path else "unknown"
+            input_size = task_ctx.input_path.stat().st_size if task_ctx.input_path and task_ctx.input_path.exists() else 0
+            duration = task_ctx.meta.duration_seconds if task_ctx.meta else 0.0
+            await record_task_start(task_id, user_id, file_name, input_size, duration, action="AI Manual")
+        except Exception as rec_err:
+            logger.debug(f"record_task_start for AI Manual: {rec_err}")
+
+        # Display initial thinking status
+        try:
+            await status_msg.edit(
+                f"**AI Video Engineer is analyzing your request...**\n\n_\"{user_prompt[:80]}...\"_",
+                buttons=None
+            )
+        except Exception:
+            pass
+
+        # Ensure agent is initialized with user's model
+        active_model = await get_user_ai_model(user_id)
+        if not task_ctx.ai_agent or task_ctx.ai_agent.preferred_model != active_model:
+            restored = await restore_ai_session(task_ctx, client)
+            if restored:
+                task_ctx.ai_agent = restored
+            else:
+                task_ctx.ai_agent = VideoAIAgent(
+                    user_id=user_id,
+                    task_id=task_id,
+                    input_path=task_ctx.input_path,
+                    meta=task_ctx.meta,
+                    preferred_model=active_model,
+                    assets=task_ctx.get_assets()
+                )
+        else:
+            task_ctx.ai_agent.assets = task_ctx.get_assets()
+            task_ctx.ai_agent.tool_executor.assets = task_ctx.get_assets()
+            task_ctx.ai_agent.input_path = task_ctx.input_path
+            task_ctx.ai_agent.meta = task_ctx.meta
+            task_ctx.ai_agent.tool_executor.input_path = task_ctx.input_path
+            task_ctx.ai_agent.tool_executor.meta = task_ctx.meta
+
+        updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
+
+        async def transcode_progress(percent: float, speed: str, eta: int, fps: float, step_label: Optional[str] = None, stalled: bool = False, **kwargs):
+            if task_ctx.is_cancelled:
+                if task_ctx.current_process:
+                    try:
+                        task_ctx.current_process.kill()
+                    except Exception:
+                        pass
+                raise asyncio.CancelledError()
+
+            if stalled:
+                text = (
+                    "**AI Transcoding in Progress...**\n\n"
+                    "• **Status:** ⏳ Still processing — FFmpeg is working on a complex segment...\n"
+                    f"• **Progress:** {make_progress_bar(percent)}\n"
+                    f"• **Engine:** `{current_hardware.description}`\n"
+                    f"• **Sandbox:** `storage/Ai_Workplace/{user_id}_{task_id}/`"
+                )
+                await updater.update(text, force=True, buttons=build_task_progress_menu(task_id))
+                return
+
+            bar = make_progress_bar(percent)
+            step_line = f"• **Operation:** `{step_label}`\n" if step_label else ""
+            text = (
+                f"**AI Transcoding in Progress...**\n\n"
+                f"{step_line}"
+                f"• **Progress:** {bar}\n"
+                f"• **Speed:** `{speed}` | **FPS:** `{fps:.1f}`\n"
+                f"• **ETA:** `{eta}s`\n"
+                f"• **Engine:** `{current_hardware.description}`\n"
+                f"• **Sandbox:** `storage/Ai_Workplace/{user_id}_{task_id}/`"
+            )
+            is_initial = (percent == 0.0 or speed in ("init", "starting"))
+            await updater.update(text, force=is_initial, buttons=build_task_progress_menu(task_id))
+
+        try:
+            result = await task_ctx.ai_agent.process_message(
+                user_prompt,
+                progress_callback=transcode_progress,
+                on_process_started=lambda p: setattr(task_ctx, "current_process", p)
+            )
+        except Exception as e:
+            logger.error(f"Error during AI reasoning turn: {e}", exc_info=True)
+            await status_msg.edit(
+                f"**AI Processing Error:**\n\n{str(e)}\n\nPlease try again or rephrase your request.",
+                buttons=build_ai_session_menu(task_id)
+            )
+            return
+
+        # 1. Error Response
+        if result.get("status") == "error":
+            err_text = result.get("error", "Unknown error")
+            formatted_err = f"**AI Operation Failed**\n\n• **Reason:** `{err_text}`\n\nYou can rephrase your request or try again below:"
+            sent = False
             try:
-                await client.send_message(user_id, formatted_err, buttons=build_ai_session_menu(task_id))
+                await status_msg.edit(formatted_err, buttons=build_ai_session_menu(task_id))
+                sent = True
             except Exception:
                 pass
-        return
+            if not sent:
+                try:
+                    await client.send_message(user_id, formatted_err, buttons=build_ai_session_menu(task_id))
+                except Exception:
+                    pass
+            return
 
-    # 2. Diagnostic Result
-    if result.get("type") == "diagnosis":
-        task_ctx.is_processing = False
-        explanation = result.get("explanation", "")
-        recommendation = result.get("recommended_action", "")
-        reduction = result.get("estimated_reduction_percent", 0)
+        # 2. Diagnostic Result
+        if result.get("type") == "diagnosis":
+            explanation = result.get("explanation", "")
+            recommendation = result.get("recommended_action", "")
+            reduction = result.get("estimated_reduction_percent", 0)
 
-        reduction_str = f" (~{reduction}% size savings)" if reduction > 0 else ""
-        text = (
-            "**AI Video Diagnostic Analysis**\n\n"
-            f"• **Root Cause:**\n{explanation}\n\n"
-            f"• **Recommended Fix:**\n{recommendation}{reduction_str}\n\n"
-            "Would you like me to apply this fix for you?"
-        )
-        task_ctx.ai_last_action_plan = {
-            "plan_title": "AI Recommended Fix",
-            "vf_filter": "scale=-2:1080" if (task_ctx.meta and (task_ctx.meta.width or 0) > 1920) else None,
-            "video_codec": "libx264",
-            "crf": 22,
-            "audio_codec": "aac",
-            "output_filename": f"ai_fixed_{task_ctx.input_path.stem}.mp4"
-        }
-        await status_msg.edit(text, buttons=build_ai_fix_menu(task_id, "recommended"))
-        return
+            reduction_str = f" (~{reduction}% size savings)" if reduction > 0 else ""
+            text = (
+                "**AI Video Diagnostic Analysis**\n\n"
+                f"• **Root Cause:**\n{explanation}\n\n"
+                f"• **Recommended Fix:**\n{recommendation}{reduction_str}\n\n"
+                "Would you like me to apply this fix for you?"
+            )
+            task_ctx.ai_last_action_plan = {
+                "plan_title": "AI Recommended Fix",
+                "vf_filter": "scale=-2:1080" if (task_ctx.meta and (task_ctx.meta.width or 0) > 1920) else None,
+                "video_codec": "libx264",
+                "crf": 22,
+                "audio_codec": "aac",
+                "output_filename": f"ai_fixed_{task_ctx.input_path.stem}.mp4"
+            }
+            await status_msg.edit(text, buttons=build_ai_fix_menu(task_id, "recommended"))
+            return
 
-    # 3. Transcode Execution Result (Tool already executed FFmpeg)
-    if result.get("type") == "transcode":
-        raw_paths = result.get("output_paths") or [result.get("output_path")]
-        out_paths = [Path(p) for p in raw_paths if p]
-        if out_paths:
-            task_ctx.output_path = out_paths[0]
-        task_ctx.processing_elapsed_time = max(0.1, time.time() - start_time)
-        asyncio.create_task(deliver_ai_results(
-            task_ctx,
-            result.get("plan_title", "AI Result"),
-            out_paths,
-            status_msg,
-            client,
-            deliverables=result.get("deliverables"),
-            assistant_text=result.get("assistant_text")
-        ))
-        return
+        # 3. Transcode Execution Result (Tool already executed FFmpeg)
+        if result.get("type") == "transcode":
+            raw_paths = result.get("output_paths") or [result.get("output_path")]
+            out_paths = [Path(p) for p in raw_paths if p]
+            if out_paths:
+                task_ctx.output_path = out_paths[0]
+            task_ctx.processing_elapsed_time = max(0.1, time.time() - start_time)
+            asyncio.create_task(deliver_ai_results(
+                task_ctx,
+                result.get("plan_title", "AI Result"),
+                out_paths,
+                status_msg,
+                client,
+                deliverables=result.get("deliverables"),
+                assistant_text=result.get("assistant_text")
+            ))
+            return
 
-    # 4. Pure Text / Conversational Response
-    task_ctx.is_processing = False
-    reply_text = result.get("text") or result.get("assistant_text") or "I have processed your request."
-    formatted_reply = f"**AI Video Engineer:**\n\n{reply_text}"
-    sent = False
-    try:
-        await status_msg.edit(formatted_reply, buttons=build_ai_session_menu(task_id))
-        sent = True
-    except Exception as e:
-        logger.warning(f"Failed to edit status message with text reply: {e}")
-
-    if not sent:
+        # 4. Pure Text / Conversational Response
+        reply_text = result.get("text") or result.get("assistant_text") or "I have processed your request."
+        formatted_reply = f"**AI Video Engineer:**\n\n{reply_text}"
+        sent = False
         try:
-            await client.send_message(user_id, formatted_reply, buttons=build_ai_session_menu(task_id))
-        except Exception as e2:
-            logger.error(f"Failed to send direct text message reply: {e2}")
+            await status_msg.edit(formatted_reply, buttons=build_ai_session_menu(task_id))
+            sent = True
+        except Exception as e:
+            logger.warning(f"Failed to edit status message with text reply: {e}")
+
+        if not sent:
+            try:
+                await client.send_message(user_id, formatted_reply, buttons=build_ai_session_menu(task_id))
+            except Exception as e2:
+                logger.error(f"Failed to send direct text message reply: {e2}")
 
 
 async def handle_ai_apply_fix(event, task_ctx, client) -> None:

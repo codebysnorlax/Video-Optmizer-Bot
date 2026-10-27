@@ -103,7 +103,8 @@ def create_bot_client() -> TelegramClient:
             active_task = task_manager.get_active_ai_task_for_user(event.sender_id)
 
             # Avoid taking new input while AI is processing or thinking
-            if active_task and active_task.is_processing:
+            is_busy = active_task and (active_task.is_processing or (hasattr(active_task, '_processing_lock') and active_task._processing_lock.locked()))
+            if is_busy:
                 try:
                     await event.reply(
                         "**AI is currently busy processing your video task.**\n"
@@ -122,6 +123,11 @@ def create_bot_client() -> TelegramClient:
 
             if is_video:
                 await handle_incoming_media(event, client)
+            elif is_audio:
+                await event.reply(
+                    "**Audio File Received.**\n\n"
+                    "To merge this audio with a video or replace audio tracks, please upload your video first and open **AI Manual Mode**."
+                )
             elif event.raw_text:
                 if active_task:
                     from bot.ai_handler import handle_ai_user_text

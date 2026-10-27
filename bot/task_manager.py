@@ -3,9 +3,10 @@ In-flight Task Manager & Concurrency Control
 """
 
 import asyncio
+import time
 import logging
 from pathlib import Path
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Dict, Optional, List, Set, Any
 from contextlib import asynccontextmanager
 from core.probe import MediaMetadata
@@ -27,6 +28,7 @@ class TaskContext:
     download_time: float = 0.0
     probe_time: float = 0.0
     is_processing: bool = False
+    _processing_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     current_stage: str = "idle"  # "downloading", "queued", "encoding", "uploading", "idle"
     is_cancelled: bool = False
     is_confirming_stop: bool = False
@@ -39,6 +41,11 @@ class TaskContext:
     ai_last_action_plan: Optional[Dict[str, Any]] = None
     assets: Optional[Dict[str, Any]] = None
     processing_elapsed_time: float = 0.0
+    last_activity_time: float = 0.0
+
+    def __post_init__(self):
+        if self.last_activity_time == 0.0:
+            self.last_activity_time = time.time()
 
     def get_assets(self) -> Dict[str, Any]:
         """Returns registered session assets, initializing v1 from input_path if needed."""
@@ -282,6 +289,66 @@ class TaskManager:
                     self._grant_next_waiter()
 
             asyncio.create_task(self._notify_queue_positions())
+
+    async def _idle_session_reaper(self, bot_client=None) -> None:
+        """Background coroutine that reaps AI sessions idle for >30 minutes."""
+        IDLE_TIMEOUT = 1800  # 30 minutes
+        CHECK_INTERVAL = 60  # check every 60 seconds
+
+        while True:
+            try:
+                await asyncio.sleep(CHECK_INTERVAL)
+                now = time.time()
+                tasks_to_reap = []
+
+                for task_id, task_ctx in list(self._active_tasks.items()):
+                    if (task_ctx.ai_session_active and
+                            now - task_ctx.last_activity_time > IDLE_TIMEOUT):
+                        tasks_to_reap.append((task_id, task_ctx))
+
+                for task_id, task_ctx in tasks_to_reap:
+                    user_id = task_ctx.user_id
+                    logger.info(f"Idle session reaper: cleaning up session for user {user_id}, task {task_id}")
+
+                    # (a) Deactivate session
+                    task_ctx.ai_session_active = False
+
+                    # (b) Clear agent reference
+                    task_ctx.ai_agent = None
+
+                    # (c) Clean workspace
+                    try:
+                        settings.clean_ai_workplace(user_id, task_id)
+                    except Exception as e:
+                        logger.warning(f"Error cleaning workplace during idle reap: {e}")
+
+                    # (d) Delete persisted session
+                    try:
+                        from database.models import delete_ai_session
+                        await delete_ai_session(user_id, task_id)
+                    except Exception as e:
+                        logger.warning(f"Error deleting session during idle reap: {e}")
+
+                    # (e) Send timeout message to user
+                    if bot_client:
+                        try:
+                            await bot_client.send_message(
+                                user_id,
+                                "**AI session timed out after 30 minutes of inactivity.**\n"
+                                "Your session has been cleaned up to free resources. "
+                                "You can start a new AI session anytime by sending a video."
+                            )
+                        except Exception as e:
+                            logger.debug(f"Could not send idle timeout message to user {user_id}: {e}")
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Idle session reaper error: {e}")
+
+    def start_idle_reaper(self, bot_client=None) -> asyncio.Task:
+        """Starts the idle session reaper as a background task."""
+        return asyncio.create_task(self._idle_session_reaper(bot_client))
 
 
 task_manager = TaskManager(max_concurrent=settings.MAX_CONCURRENT_ENCODING)

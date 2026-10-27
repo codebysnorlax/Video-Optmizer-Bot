@@ -329,6 +329,33 @@ For video: lower setpts = faster. For audio: higher atempo = faster. `atempo` su
 
 ---
 
+## Loop Audio Track
+
+Loop audio to fit target video duration:
+
+```bash
+ffmpeg -n -i "$INPUT" \
+  -c:v copy \
+  -af "aloop=loop=-1:size=2e+09" \
+  -c:a aac -b:a 128k \
+  -t 15 \
+  "$OUTPUT"
+```
+
+Loop audio N times (e.g. 2 times):
+
+```bash
+ffmpeg -n -i "$INPUT" \
+  -c:v copy \
+  -af "aloop=loop=2:size=2e+09" \
+  -c:a aac -b:a 128k \
+  "$OUTPUT"
+```
+
+*Note: FFmpeg does not have an `arepeat` filter. Always use `aloop=loop=N:size=2e+09` where `size=2e+09` allocates the sample loop buffer.*
+
+---
+
 ## Add Text Overlay
 
 ```bash

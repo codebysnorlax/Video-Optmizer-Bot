@@ -125,6 +125,13 @@ async def get_or_restore_task_ctx(task_id: str, event: events.CallbackQuery.Even
             task_ctx.status_message = await event.get_message()
         except Exception:
             pass
+        if task_ctx.ai_session_active and task_ctx.ai_agent is None:
+            try:
+                from bot.ai_handler import restore_ai_session
+                client = getattr(event, "client", None)
+                task_ctx.ai_agent = await restore_ai_session(task_ctx, client)
+            except Exception as e:
+                logger.debug(f"Could not restore ai_agent on existing task_ctx: {e}")
         return task_ctx
 
     cache = await get_file_cache(task_id)
@@ -158,6 +165,16 @@ async def get_or_restore_task_ctx(task_id: str, event: events.CallbackQuery.Even
             probe_time=0.0
         )
         task_manager.register_task(task_ctx)
+        try:
+            from database.models import load_ai_session
+            saved_session = await load_ai_session(task_ctx.user_id, task_id)
+            if saved_session and saved_session.get("is_active", 0) == 1:
+                task_ctx.ai_session_active = True
+                from bot.ai_handler import restore_ai_session
+                client = getattr(event, "client", None)
+                task_ctx.ai_agent = await restore_ai_session(task_ctx, client)
+        except Exception as e:
+            logger.debug(f"Could not restore ai_session from persistence: {e}")
         return task_ctx
     except Exception as e:
         logger.error(f"Failed to restore task context for {task_id}: {e}")
@@ -259,8 +276,36 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         if not task_ctx:
             await event.answer("Session expired or file was deleted.", alert=True)
             return
+        if task_ctx.ai_agent is None and task_ctx.ai_session_active:
+            from bot.ai_handler import restore_ai_session
+            task_ctx.ai_agent = await restore_ai_session(task_ctx, client)
         from bot.ai_handler import handle_ai_session_start
         await handle_ai_session_start(event, task_ctx, client)
+        return
+
+    if action_type == "ai_exit":
+        task_id = parts[1]
+        task_ctx = await get_or_restore_task_ctx(task_id, event)
+        user_id = event.sender_id
+        if task_ctx:
+            task_ctx.ai_session_active = False
+            task_ctx.ai_agent = None
+        try:
+            settings.clean_ai_workplace(user_id, task_id)
+        except Exception as e:
+            logger.warning(f"Error cleaning workplace on ai_exit: {e}")
+        try:
+            from database.models import delete_ai_session
+            await delete_ai_session(user_id, task_id)
+        except Exception as e:
+            logger.warning(f"Error deleting ai_session on ai_exit: {e}")
+
+        if task_ctx and task_ctx.meta:
+            menu = build_main_menu(task_id)
+            summary = task_ctx.meta.get_summary_card(current_hardware.description)
+            await event.edit(summary, buttons=menu)
+        else:
+            await event.answer("AI session closed and resources cleaned up.", alert=True)
         return
 
     if action_type == "ai_quick":
@@ -319,8 +364,10 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
         if 0 <= idx < len(models):
             selected = models[idx]["id"]
             await set_user_ai_model(user_id, selected)
-            from core.ai.client import ai_client
-            ai_client.set_model(selected)
+            # Update per-user agent model, not global singleton
+            active_task = task_manager.get_active_ai_task_for_user(user_id)
+            if active_task and active_task.ai_agent:
+                active_task.ai_agent.preferred_model = selected
             current_model = selected
             await event.answer(f"Switched model to: {selected}")
         else:
@@ -371,10 +418,8 @@ async def handle_callback_query(event: events.CallbackQuery.Event, client) -> No
             await event.answer("Session expired or file was deleted.", alert=True)
             return
         task_ctx.ai_session_active = False
-        try:
-            settings.clean_ai_workplace(task_ctx.user_id, task_id)
-        except Exception as e:
-            logger.warning(f"Error cleaning workplace on main_menu exit: {e}")
+        # Workspace cleanup deferred: only occurs on explicit "Exit AI Session" or idle timeout.
+        # Do NOT clean here — files may still be needed if user returns to AI session.
         menu = build_main_menu(task_id)
         summary = task_ctx.meta.get_summary_card(current_hardware.description)
         await event.edit(summary, buttons=menu)

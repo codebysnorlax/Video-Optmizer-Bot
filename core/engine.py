@@ -5,6 +5,7 @@ Asynchronous FFmpeg Execution Engine with Live Progress Parser
 import asyncio
 import logging
 import re
+import time
 from typing import List, Callable, Optional, Awaitable, Any
 
 logger = logging.getLogger(__name__)
@@ -60,7 +61,24 @@ async def run_ffmpeg_with_progress(
     current_fps = 0.0
     current_speed = "1.0x"
     last_update_time = 0.0
+    last_callback_time = time.time()
+    last_percent = 0.0
     loop = asyncio.get_event_loop()
+
+    async def _stall_detector():
+        nonlocal last_callback_time, last_percent
+        while True:
+            await asyncio.sleep(10)
+            if time.time() - last_callback_time > 30 and proc.returncode is None:
+                if progress_callback:
+                    try:
+                        await progress_callback(last_percent, current_speed, 0, current_fps, stalled=True)
+                    except TypeError:
+                        await progress_callback(last_percent, current_speed, 0, current_fps)
+                    except Exception:
+                        pass
+
+    stall_task = asyncio.create_task(_stall_detector()) if progress_callback else None
 
     try:
         while True:
@@ -104,6 +122,8 @@ async def run_ffmpeg_with_progress(
 
                             try:
                                 await progress_callback(percent, current_speed, eta, current_fps)
+                                last_callback_time = time.time()
+                                last_percent = percent
                             except Exception as e:
                                 logger.debug(f"Progress callback exception: {e}")
                 except Exception:
@@ -112,6 +132,8 @@ async def run_ffmpeg_with_progress(
                 if progress_callback:
                     try:
                         await progress_callback(100.0, current_speed, 0, current_fps)
+                        last_callback_time = time.time()
+                        last_percent = 100.0
                     except Exception:
                         pass
 
@@ -128,3 +150,13 @@ async def run_ffmpeg_with_progress(
         except Exception:
             pass
         raise
+    finally:
+        if stall_task and not stall_task.done():
+            stall_task.cancel()
+            try:
+                await stall_task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                pass
+

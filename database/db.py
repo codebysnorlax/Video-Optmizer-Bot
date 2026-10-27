@@ -68,6 +68,22 @@ async def init_db() -> None:
             )
         """)
 
+        # AI session persistence table (conversation history, assets, agent config)
+        await db.execute("""
+            CREATE TABLE IF NOT EXISTS ai_sessions (
+                user_id INTEGER,
+                task_id TEXT,
+                history_json TEXT,
+                assets_json TEXT,
+                preferred_model TEXT,
+                input_path TEXT,
+                is_active INTEGER DEFAULT 1,
+                last_activity TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                PRIMARY KEY (user_id, task_id)
+            )
+        """)
+
         # Backward compatibility column check
         async with db.execute("PRAGMA table_info(file_cache)") as cursor:
             cols = [row[1] for row in await cursor.fetchall()]

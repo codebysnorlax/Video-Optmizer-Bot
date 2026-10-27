@@ -3,6 +3,7 @@ Database Models & Query Repository
 """
 
 import os
+import json
 import aiosqlite
 import logging
 from pathlib import Path
@@ -257,3 +258,100 @@ async def set_user_ai_model(user_id: int, ai_model: str) -> None:
             await db.commit()
     except Exception as e:
         logger.warning(f"Error saving user_preferences: {e}")
+
+
+async def save_ai_session(
+    user_id: int,
+    task_id: str,
+    history: List[Dict[str, Any]],
+    assets: Dict[str, Any],
+    model: str,
+    input_path: str
+) -> None:
+    """Persists AI conversation history, assets, model, and input path to SQLite."""
+    try:
+        history_json = json.dumps(history, default=str)
+        assets_json = json.dumps(assets, default=str)
+        async with aiosqlite.connect(settings.DB_PATH) as db:
+            await db.execute("""
+                INSERT INTO ai_sessions (user_id, task_id, history_json, assets_json, preferred_model, input_path, is_active, last_activity)
+                VALUES (?, ?, ?, ?, ?, ?, 1, CURRENT_TIMESTAMP)
+                ON CONFLICT(user_id, task_id) DO UPDATE SET
+                    history_json = excluded.history_json,
+                    assets_json = excluded.assets_json,
+                    preferred_model = excluded.preferred_model,
+                    input_path = excluded.input_path,
+                    is_active = 1,
+                    last_activity = CURRENT_TIMESTAMP
+            """, (user_id, task_id, history_json, assets_json, model, input_path))
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"Error saving AI session: {e}")
+
+
+async def load_ai_session(user_id: int, task_id: str) -> Optional[Dict[str, Any]]:
+    """Loads a persisted AI session from SQLite. Returns deserialized dict or None."""
+    try:
+        async with aiosqlite.connect(settings.DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM ai_sessions WHERE user_id = ? AND task_id = ?",
+                (user_id, task_id)
+            ) as cursor:
+                row = await cursor.fetchone()
+                if not row:
+                    return None
+                data = dict(row)
+                data["history"] = json.loads(data.get("history_json") or "[]")
+                data["assets"] = json.loads(data.get("assets_json") or "{}")
+                return data
+    except Exception as e:
+        logger.warning(f"Error loading AI session: {e}")
+    return None
+
+
+async def delete_ai_session(user_id: int, task_id: str) -> None:
+    """Deletes a persisted AI session from SQLite."""
+    try:
+        async with aiosqlite.connect(settings.DB_PATH) as db:
+            await db.execute(
+                "DELETE FROM ai_sessions WHERE user_id = ? AND task_id = ?",
+                (user_id, task_id)
+            )
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"Error deleting AI session: {e}")
+
+
+async def get_active_sessions_for_user(user_id: int) -> List[Dict[str, Any]]:
+    """Returns all active AI sessions for a user."""
+    sessions: List[Dict[str, Any]] = []
+    try:
+        async with aiosqlite.connect(settings.DB_PATH) as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM ai_sessions WHERE user_id = ? AND is_active = 1",
+                (user_id,)
+            ) as cursor:
+                rows = await cursor.fetchall()
+                for row in rows:
+                    data = dict(row)
+                    data["history"] = json.loads(data.get("history_json") or "[]")
+                    data["assets"] = json.loads(data.get("assets_json") or "{}")
+                    sessions.append(data)
+    except Exception as e:
+        logger.warning(f"Error getting active sessions: {e}")
+    return sessions
+
+
+async def update_session_activity(user_id: int, task_id: str) -> None:
+    """Updates last_activity timestamp for idle timeout tracking."""
+    try:
+        async with aiosqlite.connect(settings.DB_PATH) as db:
+            await db.execute(
+                "UPDATE ai_sessions SET last_activity = CURRENT_TIMESTAMP WHERE user_id = ? AND task_id = ?",
+                (user_id, task_id)
+            )
+            await db.commit()
+    except Exception as e:
+        logger.warning(f"Error updating session activity: {e}")

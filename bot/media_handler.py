@@ -247,14 +247,27 @@ async def handle_incoming_session_asset(event: events.NewMessage.Event, task_ctx
     save_path = settings.DOWNLOAD_DIR / f"{task_ctx.task_id}_{clean_name}"
 
     display_name = clean_display_name(clean_name)
-    status_msg = await event.reply(f"**Adding new {media_type} to active AI session...**\n`{display_name}`")
+    status_msg = await event.reply(f"**Receiving {media_type} for AI session...**\nConnecting to stream: `{display_name}`")
+    updater = ThrottledMessageUpdater(status_msg, interval=settings.PROGRESS_UPDATE_INTERVAL)
+    start_time = time.time()
+
+    async def download_progress(current_bytes: int, total_bytes: int):
+        text = format_progress_status(
+            action_label=f"**Downloading {media_type.capitalize()} for AI Session:**",
+            current_bytes=current_bytes,
+            total_bytes=total_bytes,
+            start_time=start_time
+        )
+        await updater.update(text)
 
     try:
         await fast_download(
             client=client,
             location_or_message=message,
-            out_path=save_path
+            out_path=save_path,
+            progress_callback=download_progress
         )
+        await updater.update(f"**Analyzing {media_type} streams with FFprobe...**\n`{display_name}`", force=True)
         meta = await probe_media(save_path)
         asset_key = task_ctx.add_asset(save_path, meta=meta, media_type=media_type)
 

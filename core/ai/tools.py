@@ -6,8 +6,10 @@ Provides vetted, sandboxed video operations strictly confined to storage/Ai_Work
 import os
 import json
 import logging
+import re
+import shutil
 from pathlib import Path
-from typing import Dict, Any, List, Optional, Callable, Awaitable
+from typing import Dict, Any, List, Optional, Callable, Awaitable, Tuple
 from core.probe import probe_media, MediaMetadata, format_bytes, format_duration, clean_display_name
 from core.hardware import current_hardware
 from core.engine import run_ffmpeg_with_progress, ProgressCallback
@@ -188,6 +190,18 @@ AI_TOOLS_SCHEMA: List[Dict[str, Any]] = [
                 "required": ["filename"]
             }
         }
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_workspace_files",
+            "description": "List all intermediate and output files currently in the AI workplace sandbox directory.",
+            "parameters": {
+                "type": "object",
+                "properties": {},
+                "required": []
+            }
+        }
     }
 ]
 
@@ -236,6 +250,273 @@ def _normalize_string_or_list(val: Any) -> List[str]:
                 result.append(str(item))
         return result
     return [str(val).strip().strip("'\"")]
+
+
+def _parse_scale_filter(ffmpeg_cmd_str: str) -> Tuple[Optional[int], Optional[int]]:
+    """
+    Extracts target (width, height) integers from -vf scale filter in ffmpeg_cmd_str.
+    Supports forms like:
+      - scale=-2:1080
+      - scale=1080:-2
+      - scale=1920:1080
+      - scale=w=1280:h=720
+      - scale=h=720:w=1280
+      - scale=1280:720:force_original_aspect_ratio=decrease
+    Returns (target_w, target_h). Non-integer expressions (e.g. iw/2) return None.
+    """
+    if not ffmpeg_cmd_str:
+        return None, None
+    match = re.search(r'\bscale=([^,; \t"\']+)', ffmpeg_cmd_str)
+    if not match:
+        return None, None
+    raw = match.group(1).strip()
+    parts = raw.split(":")
+    w: Optional[int] = None
+    h: Optional[int] = None
+    pos = 0
+    for part in parts:
+        part = part.strip()
+        if "=" in part:
+            k, v = part.split("=", 1)
+            k = k.strip().lower()
+            v = v.strip()
+            try:
+                if k == "w":
+                    w = int(v)
+                elif k == "h":
+                    h = int(v)
+            except ValueError:
+                pass
+        else:
+            try:
+                val = int(part)
+                if pos == 0:
+                    w = val
+                elif pos == 1:
+                    h = val
+            except ValueError:
+                pass
+            pos += 1
+    return w, h
+
+
+def _parse_speed_factor(ffmpeg_cmd_str: str) -> Optional[float]:
+    """
+    Extracts the duration multiplier from setpts or atempo in ffmpeg_cmd_str.
+    For setpts=K*PTS or setpts=PTS*K: duration is multiplied by K (e.g. 2.0*PTS -> 2x longer).
+    For setpts=PTS/K: duration is divided by K (e.g. PTS/2 -> 0.5x duration).
+    For setpts=1/K*PTS: duration is 1/K.
+    For atempo=K: audio speed is K, so duration is multiplied by 1/K (e.g. atempo=0.5 -> 2x duration).
+    Returns expected duration multiplier (e.g. 2.0 for 2x slow-down, 0.5 for 2x speed-up).
+    """
+    if not ffmpeg_cmd_str:
+        return None
+
+    # Check setpts in video filters first
+    # 1. setpts=2.0*PTS or setpts=(2.0)*PTS or setpts=PTS*2.0
+    m = re.search(r'setpts=(?:\(?([0-9.]+)\)?\*PTS|PTS\*(?:\(?([0-9.]+)\)?))', ffmpeg_cmd_str, re.IGNORECASE)
+    if m:
+        try:
+            val = float(m.group(1) or m.group(2))
+            if val > 0:
+                return val
+        except ValueError:
+            pass
+
+    # 2. setpts=PTS/2.0 or setpts=PTS/(2.0)
+    m = re.search(r'setpts=PTS/(?:\(?([0-9.]+)\)?)', ffmpeg_cmd_str, re.IGNORECASE)
+    if m:
+        try:
+            val = float(m.group(1))
+            if val > 0:
+                return 1.0 / val
+        except ValueError:
+            pass
+
+    # 3. setpts=1/2*PTS or setpts=(1/2)*PTS
+    m = re.search(r'setpts=\(?([0-9.]+)/([0-9.]+)\)?\*PTS', ffmpeg_cmd_str, re.IGNORECASE)
+    if m:
+        try:
+            num = float(m.group(1))
+            den = float(m.group(2))
+            if den > 0:
+                return num / den
+        except ValueError:
+            pass
+
+    # Check atempo in audio filters
+    atempo_matches = re.findall(r'atempo=([0-9.]+)', ffmpeg_cmd_str, re.IGNORECASE)
+    if atempo_matches:
+        try:
+            total_tempo = 1.0
+            for a in atempo_matches:
+                f_a = float(a)
+                if f_a > 0:
+                    total_tempo *= f_a
+            if total_tempo > 0:
+                return 1.0 / total_tempo
+        except ValueError:
+            pass
+
+    return None
+
+
+def validate_output(
+    input_meta: Optional[MediaMetadata],
+    output_meta: Optional[MediaMetadata],
+    ffmpeg_cmd_str: str,
+    plan_title: str
+) -> Tuple[bool, str, List[str]]:
+    """
+    Validates output quality gates after FFmpeg execution.
+    Implements 4 checks from design.md D3:
+      1. Resolution check (±2px tolerance against scale filter in ffmpeg_cmd_str)
+      2. Duration check (within [0.98, 1.02] ratio, or [0.90, 1.10] against speed-adjusted duration, skipped if -ss/-to/-t/trim present)
+      3. Size inflation warning (warns if output > input for optimize/compress/reduce plans)
+      4. Stream presence check (fails if input has video+audio but output has only video without -an)
+
+    Returns (is_valid, error_description, warnings_list).
+    """
+    warnings: List[str] = []
+
+    if output_meta is None:
+        return False, "Output media probe failed or file is empty", warnings
+
+    # 1. Resolution check
+    scale_w, scale_h = _parse_scale_filter(ffmpeg_cmd_str)
+    if scale_w is not None or scale_h is not None:
+        if not output_meta.has_video or output_meta.width is None or output_meta.height is None:
+            return False, "Resolution check failed: scale was specified but output has no video stream or dimensions", warnings
+
+        out_w = output_meta.width
+        out_h = output_meta.height
+
+        # Both width and height are fixed positive targets
+        if scale_w is not None and scale_w > 0 and scale_h is not None and scale_h > 0:
+            if abs(out_w - scale_w) > 2 or abs(out_h - scale_h) > 2:
+                return False, f"Resolution mismatch: expected {scale_w}x{scale_h}, got {out_w}x{out_h}", warnings
+
+        # Height is fixed positive, width is proportional (e.g. scale=-2:1080)
+        elif scale_h is not None and scale_h > 0 and (scale_w is None or scale_w < 0):
+            if abs(out_h - scale_h) > 2:
+                return False, f"Resolution mismatch: expected height {scale_h}, got {out_h} ({out_w}x{out_h})", warnings
+            if input_meta and input_meta.width and input_meta.height and input_meta.height > 0:
+                expected_w = input_meta.width * scale_h / input_meta.height
+                if scale_w == -2:
+                    expected_w = round(expected_w / 2.0) * 2
+                else:
+                    expected_w = round(expected_w)
+                if abs(out_w - expected_w) > 2:
+                    return False, f"Resolution mismatch: expected width ~{int(expected_w)}, got {out_w} ({out_w}x{out_h})", warnings
+
+        # Width is fixed positive, height is proportional (e.g. scale=1080:-2)
+        elif scale_w is not None and scale_w > 0 and (scale_h is None or scale_h < 0):
+            if abs(out_w - scale_w) > 2:
+                return False, f"Resolution mismatch: expected width {scale_w}, got {out_w} ({out_w}x{out_h})", warnings
+            if input_meta and input_meta.width and input_meta.height and input_meta.width > 0:
+                expected_h = input_meta.height * scale_w / input_meta.width
+                if scale_h == -2:
+                    expected_h = round(expected_h / 2.0) * 2
+                else:
+                    expected_h = round(expected_h)
+                if abs(out_h - expected_h) > 2:
+                    return False, f"Resolution mismatch: expected height ~{int(expected_h)}, got {out_h} ({out_w}x{out_h})", warnings
+
+    # 2. Duration check
+    has_trim = bool(
+        re.search(r'(?:^|\s)-(?:ss|to|t)\b', ffmpeg_cmd_str)
+        or re.search(r'\b(?:a)?trim\b', ffmpeg_cmd_str)
+        or "-shortest" in ffmpeg_cmd_str
+    )
+    speed_mult = _parse_speed_factor(ffmpeg_cmd_str)
+    has_speed_intent = bool(
+        speed_mult is not None
+        or re.search(r'\b(?:setpts|atempo|minterpolate)\b', ffmpeg_cmd_str)
+        or any(kw in (plan_title or "").lower() for kw in ("slow", "speed", "timelapse", "hyperlapse", "fast forward", "tempo"))
+    )
+    has_loop_intent = bool(
+        re.search(r'\b(?:a)?loop\b', ffmpeg_cmd_str)
+        or any(kw in (plan_title or "").lower() for kw in ("loop", "repeat"))
+    )
+
+    if input_meta and input_meta.duration_seconds and input_meta.duration_seconds > 0:
+        out_dur = output_meta.duration_seconds if output_meta.duration_seconds else 0.0
+        if speed_mult is not None and speed_mult > 0:
+            expected_dur = input_meta.duration_seconds * speed_mult
+            ratio = out_dur / expected_dur if expected_dur > 0 else 1.0
+            if ratio < 0.90 or ratio > 1.10:
+                return False, f"Duration integrity check failed: output duration ({out_dur:.2f}s) differs from expected speed-adjusted duration ({expected_dur:.2f}s) - ratio {ratio:.2f} outside [0.90, 1.10]", warnings
+        elif not has_trim and not has_speed_intent and not has_loop_intent:
+            ratio = out_dur / input_meta.duration_seconds
+            if ratio < 0.98 or ratio > 1.02:
+                return False, f"Duration integrity check failed: output duration ({out_dur:.2f}s) differs from input ({input_meta.duration_seconds:.2f}s) - ratio {ratio:.2f} outside [0.98, 1.02]", warnings
+
+    # 3. Size inflation warning
+    plan_title_lower = (plan_title or "").lower()
+    if any(kw in plan_title_lower for kw in ("optimize", "compress", "reduce")):
+        if (
+            input_meta
+            and input_meta.file_size_bytes
+            and output_meta
+            and output_meta.file_size_bytes
+            and output_meta.file_size_bytes > input_meta.file_size_bytes
+        ):
+            warnings.append(
+                f"Output file size ({format_bytes(output_meta.file_size_bytes)}) is larger than input ({format_bytes(input_meta.file_size_bytes)}) despite optimization plan."
+            )
+
+    # 4. Stream presence check
+    if (
+        input_meta
+        and input_meta.has_video
+        and input_meta.has_audio
+        and output_meta
+        and output_meta.has_video
+        and not output_meta.has_audio
+    ):
+        has_an = bool(re.search(r'(?:^|\s)-an\b', ffmpeg_cmd_str))
+        if not has_an:
+            return False, "Stream loss detected: input contained both video and audio, but output contains only video without -an flag", warnings
+
+    return True, "", warnings
+
+
+def check_disk_space(sandbox_dir: Path, estimated_output_size: int) -> tuple:
+    """Pre-flight check for available disk space before FFmpeg execution."""
+    try:
+        target = sandbox_dir if sandbox_dir.exists() else sandbox_dir.parent
+        free = shutil.disk_usage(target).free
+        required = estimated_output_size * 2
+        if free >= required:
+            return (True, f"Sufficient disk space: {free // (1024*1024)} MB free, {required // (1024*1024)} MB needed.")
+        else:
+            return (False, f"Not enough disk space. {free // (1024*1024)} MB free, need approximately {required // (1024*1024)} MB. Please delete unused files via /files.")
+    except Exception as e:
+        logger.warning(f"Disk space check failed: {e}")
+        return (True, "Could not verify disk space, proceeding anyway.")
+
+
+def check_available_ram(min_mb: int = 300) -> tuple:
+    """Pre-flight check for available RAM before memory-intensive FFmpeg operations."""
+    available_mb = 0
+    try:
+        with open("/proc/meminfo", "r") as f:
+            for line in f:
+                if line.startswith("MemAvailable:"):
+                    available_kb = int(line.split()[1])
+                    available_mb = available_kb // 1024
+                    break
+    except FileNotFoundError:
+        try:
+            import psutil
+            available_mb = psutil.virtual_memory().available // (1024 * 1024)
+        except ImportError:
+            return (True, 0)
+    except Exception:
+        return (True, 0)
+
+    sufficient = available_mb >= min_mb
+    return (sufficient, available_mb)
 
 
 class SafeToolExecutor:
@@ -342,6 +623,40 @@ class SafeToolExecutor:
         deliverables: List[Dict[str, Any]] = []
         executed_commands: List[str] = []
         total_ops = len(op_list)
+
+        # Pre-flight resource checks
+        for op in op_list:
+            # Estimate output size based on the actual target input for this op
+            op_inputs = _normalize_string_or_list(op.get("inputs")) or ["v1"]
+            resolved_op_inputs = [self._resolve_input_path(str(i)) for i in op_inputs]
+            target_in_path = resolved_op_inputs[0] if (resolved_op_inputs and resolved_op_inputs[0].exists()) else self.input_path
+            input_size = target_in_path.stat().st_size if target_in_path.exists() else 0
+            op_vf_check = op.get("vf_filter", "") or ""
+            op_af_check = op.get("af_filter", "") or ""
+            is_audio_extract = op.get("extract_audio_only", False) or (op.get("video_codec") == "none")
+
+            estimated_output = int(input_size * 0.1) if is_audio_extract else int(input_size * 1.5)
+            op_speed_mult = _parse_speed_factor(f"{op_vf_check} {op_af_check}")
+            if op_speed_mult and op_speed_mult > 1.0:
+                estimated_output = int(estimated_output * op_speed_mult)
+
+            disk_ok, disk_msg = check_disk_space(self.workplace_dir, estimated_output)
+            if not disk_ok:
+                return {"status": "error", "error": disk_msg}
+
+            # RAM check for memory-intensive operations
+            needs_ram_check = (
+                "reverse" in op_vf_check or 
+                "areverse" in op_af_check or
+                (op.get("inputs") and len(_normalize_string_or_list(op.get("inputs"))) > 2)
+            )
+            if needs_ram_check:
+                ram_ok, available_mb = check_available_ram(min_mb=300)
+                if not ram_ok:
+                    return {
+                        "status": "error",
+                        "error": f"Insufficient RAM for this operation. Available: {available_mb} MB, minimum required: 300 MB. Please close other apps and try again."
+                    }
 
         for op_idx, op in enumerate(op_list, start=1):
             raw_out_name = op.get("output_filename") or f"output_{op_idx}.mp4"
@@ -464,7 +779,17 @@ class SafeToolExecutor:
                 if safe_filename.lower().endswith(".mp3") and acodec == "aac":
                     acodec = "mp3"
                 if op_af and op_af.strip():
-                    cmd.extend(["-af", op_af.strip()])
+                    clean_af = op_af.strip()
+                    # Sanitize hallucinated arepeat filter -> aloop
+                    if "arepeat" in clean_af:
+                        import re
+                        m = re.search(r'arepeat[=:][^,;]*?([0-9-]+)', clean_af)
+                        loop_count = m.group(1) if m else "-1"
+                        pattern = r'arepeat(?:=[^\',;]*(?:\'[^\']*\')*[^\',;]*|:[^\',;]*(?:\'[^\']*\')*[^\',;]*)?'
+                        clean_af = re.sub(pattern, f'aloop=loop={loop_count}:size=2e+09', clean_af)
+                    cmd.extend(["-af", clean_af])
+                    if acodec == "copy":
+                        acodec = "aac"
                 if acodec == "copy":
                     cmd.extend(["-c:a", "copy"])
                 elif acodec == "aac":
@@ -506,17 +831,25 @@ class SafeToolExecutor:
 
             # Wrap progress callback with step context
             disp_out_name = clean_display_name(safe_filename)
-            async def op_progress(percent: float, speed: str, eta: Optional[int], fps: float):
+            async def op_progress(percent: float, speed: str, eta: Optional[int], fps: float, **kwargs):
                 if progress_callback:
                     try:
-                        await progress_callback(percent, speed, eta, fps, step_label=f"({op_idx}/{total_ops}) {disp_out_name}")
+                        await progress_callback(percent, speed, eta, fps, step_label=f"({op_idx}/{total_ops}) {disp_out_name}", **kwargs)
                     except TypeError:
-                        await progress_callback(percent, speed, eta, fps)
+                        try:
+                            await progress_callback(percent, speed, eta, fps, **kwargs)
+                        except TypeError:
+                            await progress_callback(percent, speed, eta, fps)
                     except Exception as pe:
                         logger.warning(f"Error in op_progress callback: {pe}")
 
             cmd_str = " ".join(cmd)
             executed_commands.append(cmd_str)
+
+            # Adjust estimated duration by speed factor if slowing down or speeding up
+            cmd_speed_mult = _parse_speed_factor(cmd_str)
+            if cmd_speed_mult and cmd_speed_mult > 0:
+                est_duration = est_duration * cmd_speed_mult
 
             try:
                 await run_ffmpeg_with_progress(
@@ -561,6 +894,98 @@ class SafeToolExecutor:
                 "size_bytes": out_path.stat().st_size,
                 "formatted_size": format_bytes(out_path.stat().st_size)
             }
+
+            # Output quality gate validation (validate against actual input for this operation)
+            actual_in_meta = None
+            if resolved_inputs:
+                try:
+                    res_p = resolved_inputs[0].resolve()
+                    if self.input_path and res_p == self.input_path.resolve():
+                        actual_in_meta = self.meta
+                    if not actual_in_meta:
+                        for k, asset_info in self.assets.items():
+                            if isinstance(asset_info, dict) and asset_info.get("filepath"):
+                                if Path(asset_info["filepath"]).resolve() == res_p:
+                                    actual_in_meta = asset_info.get("meta")
+                                    break
+                except Exception:
+                    pass
+                if not actual_in_meta and resolved_inputs[0].exists():
+                    try:
+                        actual_in_meta = await probe_media(resolved_inputs[0])
+                    except Exception:
+                        pass
+            if not actual_in_meta:
+                actual_in_meta = self.meta
+
+            warnings: List[str] = []
+            if actual_in_meta and out_meta:
+                is_valid, error_msg, warnings = validate_output(
+                    input_meta=actual_in_meta,
+                    output_meta=out_meta,
+                    ffmpeg_cmd_str=cmd_str,
+                    plan_title=plan_title
+                )
+                if not is_valid:
+                    # Retry once
+                    logger.warning(f"Quality gate failed: {error_msg}. Retrying...")
+                    try:
+                        if out_path.exists():
+                            out_path.unlink()
+                        await run_ffmpeg_with_progress(
+                            cmd=cmd,
+                            total_duration_seconds=est_duration,
+                            progress_callback=op_progress if progress_callback else None,
+                            on_process_started=on_process_started
+                        )
+                    except Exception as retry_err:
+                        return {
+                            "status": "error",
+                            "error": f"Quality gate failed: {error_msg}. Retry also failed: {str(retry_err)}",
+                            "executed_commands": executed_commands
+                        }
+                    # Re-verify after retry
+                    if not out_path.exists() or out_path.stat().st_size == 0:
+                        return {
+                            "status": "error",
+                            "error": f"Quality gate failed: {error_msg}. Retry produced no output.",
+                            "executed_commands": executed_commands
+                        }
+                    retry_meta = await probe_media(out_path)
+                    is_valid2, error_msg2, warnings2 = validate_output(
+                        input_meta=actual_in_meta,
+                        output_meta=retry_meta,
+                        ffmpeg_cmd_str=cmd_str,
+                        plan_title=plan_title
+                    )
+                    if not is_valid2:
+                        return {
+                            "status": "error",
+                            "error": f"Quality gate failed after retry: {error_msg2}",
+                            "executed_commands": executed_commands
+                        }
+                    out_meta = retry_meta
+                    warnings = warnings2
+                    # Rebuild ffprobe_dict with retry output
+                    ffprobe_dict = {
+                        "filename": safe_filename,
+                        "has_video": out_meta.has_video if out_meta else False,
+                        "resolution": out_meta.resolution_label if (out_meta and out_meta.has_video) else ("Audio Track" if (out_meta and out_meta.has_audio) else "Unknown"),
+                        "width": out_meta.width if out_meta else None,
+                        "height": out_meta.height if out_meta else None,
+                        "video_codec": out_meta.video_codec if out_meta else None,
+                        "video_bitrate_kbps": out_meta.video_bitrate_kbps if out_meta else None,
+                        "fps": round(out_meta.fps, 2) if (out_meta and out_meta.fps) else None,
+                        "has_audio": out_meta.has_audio if out_meta else False,
+                        "audio_codec": out_meta.audio_codec if out_meta else None,
+                        "audio_bitrate_kbps": out_meta.audio_bitrate_kbps if out_meta else None,
+                        "overall_bitrate_kbps": out_meta.overall_bitrate_kbps if out_meta else None,
+                        "duration_seconds": round(out_meta.duration_seconds, 2) if out_meta else 0.0,
+                        "formatted_duration": format_duration(out_meta.duration_seconds) if out_meta else "Unknown",
+                        "size_bytes": out_path.stat().st_size,
+                        "formatted_size": format_bytes(out_path.stat().st_size)
+                    }
+
             deliverables.append({
                 "filename": safe_filename,
                 "path": str(out_path),
@@ -569,7 +994,8 @@ class SafeToolExecutor:
                 "resolution": ffprobe_dict["resolution"],
                 "duration": ffprobe_dict["formatted_duration"],
                 "ffmpeg_command": cmd_str,
-                "ffprobe": ffprobe_dict
+                "ffprobe": ffprobe_dict,
+                "warnings": warnings
             })
 
         if not deliverables:
@@ -593,6 +1019,7 @@ class SafeToolExecutor:
             "resolution": first["resolution"],
             "duration": first["duration"],
             "ffprobe": first.get("ffprobe", {}),
+            "warnings": first.get("warnings", []),
             "executed_commands": executed_commands,
             "ffmpeg_command": executed_commands[0] if executed_commands else ""
         }
@@ -618,3 +1045,20 @@ class SafeToolExecutor:
             "audio_codec": meta.audio_codec,
             "bitrate": f"{meta.overall_bitrate_kbps} kbps"
         }
+
+    async def run_list_workspace_files(self) -> Dict[str, Any]:
+        """Lists all files in the workspace sandbox directory."""
+        import mimetypes
+        files = []
+        if self.workplace_dir.exists():
+            for f in self.workplace_dir.iterdir():
+                if f.is_file():
+                    mime_type = mimetypes.guess_type(str(f))[0] or "application/octet-stream"
+                    media_type = "video" if mime_type.startswith("video") else ("audio" if mime_type.startswith("audio") else "other")
+                    files.append({
+                        "filename": f.name,
+                        "size_bytes": f.stat().st_size,
+                        "media_type": media_type
+                    })
+        return {"status": "success", "files": files}
+

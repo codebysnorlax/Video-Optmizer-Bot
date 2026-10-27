@@ -16,7 +16,12 @@ from core.hardware import current_hardware
 from core.ai.skills import skill_registry, SkillRegistry
 from core.ai.client import OpenRouterClient
 from core.ai.tools import SafeToolExecutor, AI_TOOLS_SCHEMA
-from core.ai.agent import VideoAIAgent
+from core.ai.agent import (
+    VideoAIAgent,
+    sanitize_message_history,
+    compress_old_history,
+    guard_truncation_boundary,
+)
 from bot.keyboards import build_main_menu, build_ai_session_menu, build_ai_fix_menu
 from bot.task_manager import TaskManager, TaskContext
 
@@ -751,8 +756,30 @@ async def test_safe_tool_executor_resolution_and_quality_guardrails(tmp_path):
         out_p = Path(cmd[-1])
         out_p.write_bytes(b"dummy_out")
 
+    meta_portrait_1080 = MediaMetadata(
+        file_path=input_file,
+        file_name="opt.mp4",
+        file_size_bytes=4000000,
+        duration_seconds=10.0,
+        container_format="mp4",
+        has_video=True,
+        video_codec="h264",
+        width=1080,
+        height=1920,
+        fps=60.0,
+        video_bitrate_kbps=2800,
+        has_audio=True,
+        audio_codec="aac",
+        audio_channels=2,
+        audio_sample_rate=48000,
+        audio_bitrate_kbps=128,
+        overall_bitrate_kbps=2928,
+        is_high_bitrate=False,
+        raw_info={}
+    )
+
     with patch("core.ai.tools.run_ffmpeg_with_progress", side_effect=mock_run_ffmpeg), \
-         patch("core.ai.tools.probe_media", AsyncMock(return_value=meta_portrait_4k)):
+         patch("core.ai.tools.probe_media", AsyncMock(return_value=meta_portrait_1080)):
 
         # 1. Inverted portrait filter (scale=-2:1080) MUST be corrected to scale=1080:-2
         await executor.run_execute_ffmpeg(
@@ -1394,3 +1421,660 @@ async def test_execute_ai_query_text_fallback_direct_message(sample_metadata):
     args, kwargs = mock_client.send_message.call_args
     assert args[0] == 999
     assert "This is a direct conversational answer." in args[1]
+
+
+def test_compress_old_history_30_messages():
+    """Task 2.1: Splits 30-message history, compresses old messages into summary mentioning asset keys, ops, and user goals, recent list has 20 messages."""
+    history = []
+    # Build 30 messages
+    # Old messages (indices 0 to 9): 10 messages
+    history.append({"role": "user", "content": "Please inspect [v1] and extract audio [a1]"})
+    history.append({
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{"id": "call_1", "function": {"name": "execute_ffmpeg_plan"}}]
+    })
+    history.append({
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "name": "execute_ffmpeg_plan",
+        "content": json.dumps({"plan_title": "Extract audio track", "status": "success"})
+    })
+    history.append({"role": "assistant", "content": "Extracted audio to [a1]."})
+    history.append({"role": "user", "content": "Now optimize [v1] to reduce lag"})
+    history.append({
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [{"id": "call_2", "function": {"name": "execute_ffmpeg_plan"}}]
+    })
+    history.append({
+        "role": "tool",
+        "tool_call_id": "call_2",
+        "name": "execute_ffmpeg_plan",
+        "content": json.dumps({"plan_title": "Downscale to 1080p", "status": "success"})
+    })
+    history.append({"role": "assistant", "content": "Downscaled successfully."})
+    history.append({"role": "user", "content": "Is the file size smaller?"})
+    history.append({"role": "assistant", "content": "Yes, it is 60% smaller."})
+
+    # Recent messages (indices 10 to 29): 20 messages
+    for i in range(10):
+        history.append({"role": "user", "content": f"User question {i}"})
+        history.append({"role": "assistant", "content": f"Assistant response {i}"})
+
+    assert len(history) == 30
+    summary, recent = compress_old_history(history, keep_recent=20)
+
+    assert len(recent) == 20
+    assert "[v1]" in summary
+    assert "[a1]" in summary
+    assert "Extract audio track" in summary or "execute_ffmpeg_plan" in summary
+    assert "Downscale to 1080p" in summary or "optimize" in summary.lower()
+    assert "User goals:" in summary
+    assert "\n\n" not in summary  # one paragraph
+
+
+def test_compress_old_history_short():
+    """Verify compress_old_history when history is within keep_recent window."""
+    history = [{"role": "user", "content": "hello"}]
+    summary, recent = compress_old_history(history, keep_recent=20)
+    assert summary == ""
+    assert recent == history
+
+
+def test_guard_truncation_boundary_recovers_assistant():
+    """Task 2.2: Truncation boundary starting on tool message recovers preceding assistant message."""
+    full_history = [
+        {"role": "user", "content": "Cut first 10 seconds"},
+        {
+            "role": "assistant",
+            "content": None,
+            "tool_calls": [{"id": "call_cut", "type": "function", "function": {"name": "execute_ffmpeg_plan"}}]
+        },
+        {
+            "role": "tool",
+            "tool_call_id": "call_cut",
+            "name": "execute_ffmpeg_plan",
+            "content": json.dumps({"plan_title": "Trim video", "status": "success"})
+        },
+        {"role": "assistant", "content": "Video trimmed successfully."}
+    ]
+
+    # Truncate right at index 2 (tool message)
+    recent = full_history[2:]
+    assert recent[0]["role"] == "tool"
+
+    guarded = guard_truncation_boundary(full_history, recent)
+    assert guarded[0]["role"] == "assistant"
+    assert guarded[0].get("tool_calls") is not None
+    assert guarded[0]["tool_calls"][0]["id"] == "call_cut"
+    assert guarded[1]["role"] == "tool"
+
+
+def test_guard_truncation_boundary_untouched_when_not_tool():
+    """Task 2.2: Guard leaves recent untouched if it doesn't start with tool."""
+    full_history = [
+        {"role": "user", "content": "hello"},
+        {"role": "assistant", "content": "hi"}
+    ]
+    recent = full_history[1:]
+    guarded = guard_truncation_boundary(full_history, recent)
+    assert guarded == recent
+
+
+def test_guard_truncation_boundary_single_arg():
+    """Task 2.2: Guard with single arg prepends synthetic assistant if starting with tool."""
+    tool_only = [{"role": "tool", "content": "result"}]
+    guarded = guard_truncation_boundary(tool_only)
+    assert guarded[0]["role"] == "assistant"
+    assert guarded[1]["role"] == "tool"
+
+
+def test_sanitize_message_history_leading_tool():
+    """Task 7.2: Post-sanitization check prepends synthetic assistant if first message is tool."""
+    raw = [
+        {"role": "tool", "tool_call_id": "call_1", "content": "output"},
+        {"role": "assistant", "content": "All done!"}
+    ]
+    sanitized = sanitize_message_history(raw)
+    assert sanitized[0]["role"] == "assistant"
+    assert sanitized[0]["content"] == "I performed the previous operation."
+    assert sanitized[1]["role"] == "tool"
+
+
+@pytest.mark.asyncio
+async def test_tiered_history_strategy_in_run_turn(sample_metadata, tmp_path):
+    """Task 2.3: VideoAIAgent.run_turn uses compressed + windowed history in API payload."""
+    mock_client = MagicMock()
+    mock_client.chat_completion = AsyncMock(return_value={
+        "role": "assistant",
+        "content": "I understand your request."
+    })
+
+    agent = VideoAIAgent(
+        user_id=123,
+        task_id="test_tiered_task",
+        input_path=Path("dummy.mp4"),
+        meta=sample_metadata,
+        client=mock_client
+    )
+
+    # Populate agent history with 24 turns (exceeding keep_recent=20)
+    for i in range(12):
+        agent.history.append({"role": "user", "content": f"Turn {i} with asset [v1] goal: transcode {i}"})
+        agent.history.append({"role": "assistant", "content": f"Turn {i} completed."})
+
+    res = await agent.run_turn("Now do one more thing")
+
+    assert res["status"] == "success"
+    mock_client.chat_completion.assert_called_once()
+    call_kwargs = mock_client.chat_completion.call_args.kwargs
+    messages = call_kwargs["messages"]
+
+    # Verify messages format
+    assert messages[0]["role"] == "system"  # main system prompt
+    assert messages[1]["role"] == "system"  # compressed summary system prompt
+    assert "Previous session context:" in messages[1]["content"]
+    assert "[v1]" in messages[1]["content"]
+
+    # Verify recent window is bounded
+    non_system_messages = [m for m in messages if m["role"] != "system"]
+    assert len(non_system_messages) <= 20
+
+
+def test_openrouter_client_set_model_no_global_mutation():
+    """Task 4.1: set_model() updates client default_model without mutating settings.OPENROUTER_MODEL."""
+    orig_model = settings.OPENROUTER_MODEL
+    client = OpenRouterClient()
+    client.set_model("custom/model-for-client")
+    assert client.default_model == "custom/model-for-client"
+    assert settings.OPENROUTER_MODEL == orig_model
+
+
+def test_task_context_processing_lock():
+    """Task 5.1: TaskContext has an asyncio.Lock _processing_lock."""
+    tc = TaskContext(
+        task_id="lock_test",
+        user_id=101,
+        input_path=Path("dummy.mp4"),
+        output_path=None,
+        meta=None,
+        status_message=None,
+        original_message_id=1
+    )
+    assert hasattr(tc, "_processing_lock")
+    assert isinstance(tc._processing_lock, asyncio.Lock)
+
+
+@pytest.mark.asyncio
+async def test_execute_ai_query_lock_busy():
+    """Task 5.2: execute_ai_query rejects concurrent calls when _processing_lock is held."""
+    from bot.ai_handler import execute_ai_query
+    status_mock = AsyncMock()
+    client_mock = AsyncMock()
+    tc = TaskContext(
+        task_id="busy_test",
+        user_id=202,
+        input_path=Path("dummy.mp4"),
+        output_path=None,
+        meta=None,
+        status_message=status_mock,
+        original_message_id=1
+    )
+
+    # Acquire lock beforehand
+    await tc._processing_lock.acquire()
+    try:
+        await execute_ai_query("Run task", tc, status_mock, client_mock)
+        status_mock.edit.assert_called_once()
+        args = status_mock.edit.call_args[0]
+        assert "AI is currently busy processing a task" in args[0]
+    finally:
+        tc._processing_lock.release()
+
+
+def test_followup_timeout_is_30s():
+    """Task 6.1: Follow-up chat completion wait_for timeout is set to 30.0s."""
+    import inspect
+    from core.ai.agent import VideoAIAgent
+    src = inspect.getsource(VideoAIAgent.run_turn)
+    assert "timeout=30.0" in src
+
+
+@pytest.mark.asyncio
+async def test_execute_ai_query_records_task_start(sample_metadata):
+    """Task 6.2: execute_ai_query calls record_task_start with action='AI Manual'."""
+    from bot.ai_handler import execute_ai_query
+    status_mock = AsyncMock()
+    client_mock = AsyncMock()
+    tc = TaskContext(
+        task_id="rec_task_62",
+        user_id=303,
+        input_path=Path("dummy.mp4"),
+        output_path=None,
+        meta=sample_metadata,
+        status_message=status_mock,
+        original_message_id=1
+    )
+
+    with patch("bot.ai_handler.record_task_start", new_callable=AsyncMock) as mock_rec, \
+         patch("bot.ai_handler.VideoAIAgent") as mock_agent_cls, \
+         patch("bot.ai_handler.get_user_ai_model", new_callable=AsyncMock) as mock_model:
+        mock_model.return_value = "free/model"
+        agent_instance = MagicMock()
+        agent_instance.preferred_model = "free/model"
+        agent_instance.process_message = AsyncMock(return_value={"status": "ok", "text": "All done"})
+        mock_agent_cls.return_value = agent_instance
+
+        await execute_ai_query("Test prompt", tc, status_mock, client_mock)
+        mock_rec.assert_called_once()
+        call_args = mock_rec.call_args[0]
+        call_kwargs = mock_rec.call_args[1]
+        assert call_args[0] == "rec_task_62"
+        assert call_args[1] == 303
+        assert call_kwargs.get("action") == "AI Manual"
+
+
+# ==============================================================================
+# Tasks 8.1 & 8.2: Output Quality Gate & SafeToolExecutor Integration Tests
+# ==============================================================================
+
+def test_validate_output_all_checks():
+    """Unit tests for validate_output implementing the 4 checks from design.md D3 (Task 8.1)."""
+    from core.ai.tools import validate_output
+
+    in_meta = make_dummy_metadata(
+        duration_seconds=120.0,
+        file_size_bytes=50_000_000,
+        has_video=True,
+        has_audio=True
+    )
+    in_meta.width = 1920
+    in_meta.height = 1080
+
+    # (a) Matching output -> valid
+    out_valid = make_dummy_metadata(
+        duration_seconds=120.0,
+        file_size_bytes=20_000_000,
+        has_video=True,
+        has_audio=True
+    )
+    out_valid.width = 1920
+    out_valid.height = 1080
+    valid, err, warns = validate_output(
+        input_meta=in_meta,
+        output_meta=out_valid,
+        ffmpeg_cmd_str="ffmpeg -i in.mp4 -vf scale=1920:1080 -c:v libx264 out.mp4",
+        plan_title="Transcode video"
+    )
+    assert valid is True
+    assert err == ""
+    assert warns == []
+
+    # (b) 360p output when 1080p expected -> invalid
+    out_360p = make_dummy_metadata(
+        duration_seconds=120.0,
+        file_size_bytes=5_000_000,
+        has_video=True,
+        has_audio=True
+    )
+    out_360p.width = 640
+    out_360p.height = 360
+    valid_b, err_b, warns_b = validate_output(
+        input_meta=in_meta,
+        output_meta=out_360p,
+        ffmpeg_cmd_str="ffmpeg -i in.mp4 -vf scale=-2:1080 -c:v libx264 out.mp4",
+        plan_title="Downscale video"
+    )
+    assert valid_b is False
+    assert "Resolution mismatch" in err_b
+    assert "1080" in err_b
+
+    # (c) 5s output from 120s input -> invalid
+    out_5s = make_dummy_metadata(
+        duration_seconds=5.0,
+        file_size_bytes=2_000_000,
+        has_video=True,
+        has_audio=True
+    )
+    out_5s.width = 1920
+    out_5s.height = 1080
+    valid_c, err_c, warns_c = validate_output(
+        input_meta=in_meta,
+        output_meta=out_5s,
+        ffmpeg_cmd_str="ffmpeg -i in.mp4 -vf scale=1920:1080 -c:v libx264 out.mp4",
+        plan_title="Convert video"
+    )
+    assert valid_c is False
+    assert "Duration integrity check failed" in err_c
+
+    # Trim filter present -> duration check skipped
+    valid_c_trim, err_c_trim, _ = validate_output(
+        input_meta=in_meta,
+        output_meta=out_5s,
+        ffmpeg_cmd_str="ffmpeg -ss 00:00:10 -i in.mp4 -t 5 -c:v copy out.mp4",
+        plan_title="Trim clip"
+    )
+    assert valid_c_trim is True
+
+    # (d) Larger output from optimization -> valid with warning
+    out_bloated = make_dummy_metadata(
+        duration_seconds=120.0,
+        file_size_bytes=60_000_000,
+        has_video=True,
+        has_audio=True
+    )
+    out_bloated.width = 1920
+    out_bloated.height = 1080
+    valid_d, err_d, warns_d = validate_output(
+        input_meta=in_meta,
+        output_meta=out_bloated,
+        ffmpeg_cmd_str="ffmpeg -i in.mp4 -c:v libx264 out.mp4",
+        plan_title="Compress and optimize video"
+    )
+    assert valid_d is True
+    assert err_d == ""
+    assert len(warns_d) == 1
+    assert "larger than input" in warns_d[0]
+
+    # Stream presence check: input has video+audio, output has only video without -an -> invalid
+    out_lost_audio = make_dummy_metadata(
+        duration_seconds=120.0,
+        file_size_bytes=20_000_000,
+        has_video=True,
+        has_audio=False
+    )
+    out_lost_audio.width = 1920
+    out_lost_audio.height = 1080
+    valid_stream, err_stream, _ = validate_output(
+        input_meta=in_meta,
+        output_meta=out_lost_audio,
+        ffmpeg_cmd_str="ffmpeg -i in.mp4 -c:v copy out.mp4",
+        plan_title="Repackage video"
+    )
+    assert valid_stream is False
+    assert "Stream loss detected" in err_stream
+
+    # Stream presence check with intentional -an -> valid
+    valid_mute, err_mute, _ = validate_output(
+        input_meta=in_meta,
+        output_meta=out_lost_audio,
+        ffmpeg_cmd_str="ffmpeg -i in.mp4 -an -c:v copy out.mp4",
+        plan_title="Mute audio track"
+    )
+    assert valid_mute is True
+
+    # (e) Speed adjustment: 2x slow-down (11.17s -> 22.32s) -> valid
+    from core.ai.tools import _parse_speed_factor
+    assert _parse_speed_factor("-vf setpts=2.0*PTS -af atempo=0.5") == 2.0
+    assert _parse_speed_factor("-vf setpts=0.5*PTS -af atempo=2.0") == 0.5
+    assert _parse_speed_factor("-vf setpts=PTS/2.0") == 0.5
+    assert _parse_speed_factor("-af atempo=0.5") == 2.0
+
+    in_short = make_dummy_metadata(duration_seconds=11.17, file_size_bytes=10_000_000, has_video=True, has_audio=True)
+    out_slow_2x = make_dummy_metadata(duration_seconds=22.32, file_size_bytes=12_000_000, has_video=True, has_audio=True)
+    valid_slow, err_slow, _ = validate_output(
+        input_meta=in_short,
+        output_meta=out_slow_2x,
+        ffmpeg_cmd_str="ffmpeg -i in.mp4 -vf setpts=2.0*PTS -af atempo=0.5 -c:v libx264 out.mp4",
+        plan_title="Slow down video 2x"
+    )
+    assert valid_slow is True
+    assert err_slow == ""
+
+    # Speed adjustment but truncated (11.17s expected 22.34s, but got 5.0s) -> invalid!
+    out_slow_broken = make_dummy_metadata(duration_seconds=5.0, file_size_bytes=3_000_000, has_video=True, has_audio=True)
+    valid_broken, err_broken, _ = validate_output(
+        input_meta=in_short,
+        output_meta=out_slow_broken,
+        ffmpeg_cmd_str="ffmpeg -i in.mp4 -vf setpts=2.0*PTS -af atempo=0.5 -c:v libx264 out.mp4",
+        plan_title="Slow down video 2x"
+    )
+    assert valid_broken is False
+    assert "Duration integrity check failed" in err_broken
+
+
+@pytest.mark.asyncio
+async def test_safe_tool_executor_quality_gate_retry_and_failure(tmp_path):
+    """Verifies SafeToolExecutor retries on quality gate failure and reports error if both fail (Task 8.2)."""
+    from core.ai.tools import SafeToolExecutor
+
+    in_f = tmp_path / "input.mp4"
+    in_f.write_bytes(b"input_bytes")
+    src_meta = make_dummy_metadata(
+        file_path=in_f,
+        file_name="input.mp4",
+        file_size_bytes=10_000_000,
+        duration_seconds=60.0
+    )
+    src_meta.width = 1920
+    src_meta.height = 1080
+
+    executor = SafeToolExecutor(user_id=888, task_id="task_qg_test", input_path=in_f, meta=src_meta)
+
+    # 1. Simulate failure on both attempts -> returns error
+    mismatch_meta = make_dummy_metadata(
+        file_path=tmp_path / "out.mp4",
+        file_name="out.mp4",
+        file_size_bytes=2_000_000,
+        duration_seconds=60.0
+    )
+    mismatch_meta.width = 640
+    mismatch_meta.height = 360
+
+    ffmpeg_run_count = 0
+    async def mock_run_fail(cmd, **kwargs):
+        nonlocal ffmpeg_run_count
+        ffmpeg_run_count += 1
+        out_p = Path(cmd[-1])
+        out_p.write_bytes(b"data")
+
+    with patch("core.ai.tools.run_ffmpeg_with_progress", side_effect=mock_run_fail), \
+         patch("core.ai.tools.probe_media", AsyncMock(return_value=mismatch_meta)):
+
+        res_fail = await executor.run_execute_ffmpeg(
+            plan_title="Scale to 1080p",
+            output_filename="out.mp4",
+            vf_filter="scale=1920:1080"
+        )
+        assert res_fail["status"] == "error"
+        assert "Quality gate failed after retry" in res_fail["error"]
+        assert "Resolution mismatch" in res_fail["error"]
+        assert ffmpeg_run_count == 2  # initial + 1 retry
+
+    # 2. Simulate failure on first attempt, success on retry -> returns success
+    good_meta = make_dummy_metadata(
+        file_path=tmp_path / "out_retry.mp4",
+        file_name="out_retry.mp4",
+        file_size_bytes=5_000_000,
+        duration_seconds=60.0
+    )
+    good_meta.width = 1920
+    good_meta.height = 1080
+
+    probe_attempts = 0
+    async def mock_probe_recovers(p):
+        if str(p) == str(in_f):
+            return src_meta
+        nonlocal probe_attempts
+        probe_attempts += 1
+        return mismatch_meta if probe_attempts == 1 else good_meta
+
+    ffmpeg_run_count = 0
+    with patch("core.ai.tools.run_ffmpeg_with_progress", side_effect=mock_run_fail), \
+         patch("core.ai.tools.probe_media", side_effect=mock_probe_recovers):
+
+        res_recover = await executor.run_execute_ffmpeg(
+            plan_title="Scale to 1080p",
+            output_filename="out_retry.mp4",
+            vf_filter="scale=1920:1080"
+        )
+        assert res_recover["status"] == "success"
+        assert ffmpeg_run_count == 2
+        assert res_recover["deliverables"][0]["ffprobe"]["width"] == 1920
+        assert res_recover["deliverables"][0]["ffprobe"]["height"] == 1080
+
+
+@pytest.mark.asyncio
+async def test_safe_tool_executor_deliverable_warnings(tmp_path):
+    """Verifies that non-fatal warnings (e.g. size inflation) are included in deliverables and return dict."""
+    from core.ai.tools import SafeToolExecutor
+
+    in_f = tmp_path / "in_opt.mp4"
+    in_f.write_bytes(b"small_input")
+    src_meta = make_dummy_metadata(
+        file_path=in_f,
+        file_name="in_opt.mp4",
+        file_size_bytes=5_000_000,
+        duration_seconds=30.0
+    )
+
+    executor = SafeToolExecutor(user_id=777, task_id="task_warn_test", input_path=in_f, meta=src_meta)
+
+    larger_meta = make_dummy_metadata(
+        file_path=tmp_path / "out_opt.mp4",
+        file_name="out_opt.mp4",
+        file_size_bytes=10_000_000,
+        duration_seconds=30.0
+    )
+
+    async def mock_ffmpeg(cmd, **kwargs):
+        out_p = Path(cmd[-1])
+        out_p.write_bytes(b"larger_output_bytes")
+
+    with patch("core.ai.tools.run_ffmpeg_with_progress", side_effect=mock_ffmpeg), \
+         patch("core.ai.tools.probe_media", AsyncMock(return_value=larger_meta)):
+
+        res = await executor.run_execute_ffmpeg(
+            plan_title="Optimize and reduce video size",
+            output_filename="out_opt.mp4"
+        )
+        assert res["status"] == "success"
+        assert "warnings" in res
+        assert len(res["warnings"]) == 1
+        assert "larger than input" in res["warnings"][0]
+        assert len(res["deliverables"][0]["warnings"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_safe_tool_executor_validates_against_targeted_input_asset(tmp_path):
+    """Verifies that quality gate validates against the operation's specific input (e.g. v1) not stale self.meta."""
+    from core.ai.tools import SafeToolExecutor
+
+    # v1 is original video of 12.0s
+    v1_file = tmp_path / "orig_v1.mp4"
+    v1_file.write_bytes(b"v1_bytes")
+    v1_meta = make_dummy_metadata(
+        file_path=v1_file,
+        file_name="orig_v1.mp4",
+        file_size_bytes=10_000_000,
+        duration_seconds=12.0
+    )
+
+    # v3 is intermediate deliverable of 6.0s (already sped up)
+    v3_file = tmp_path / "inter_v3.mp4"
+    v3_file.write_bytes(b"v3_bytes")
+    v3_meta = make_dummy_metadata(
+        file_path=v3_file,
+        file_name="inter_v3.mp4",
+        file_size_bytes=5_000_000,
+        duration_seconds=6.0
+    )
+
+    # Executor is currently pointing to v3 as latest
+    executor = SafeToolExecutor(user_id=555, task_id="task_target_input", input_path=v3_file, meta=v3_meta)
+    executor.assets = {
+        "v1": {"filepath": str(v1_file), "filename": "orig_v1.mp4", "meta": v1_meta},
+        "v3": {"filepath": str(v3_file), "filename": "inter_v3.mp4", "meta": v3_meta}
+    }
+
+    # Output produced by applying 2x speedup on v1 -> duration is 6.0s (12.0 / 2)
+    out_file = tmp_path / "fast_from_v1.mp4"
+    out_meta = make_dummy_metadata(
+        file_path=out_file,
+        file_name="fast_from_v1.mp4",
+        file_size_bytes=5_000_000,
+        duration_seconds=6.0
+    )
+
+    async def mock_ffmpeg(cmd, **kwargs):
+        out_p = Path(cmd[-1])
+        out_p.write_bytes(b"output_fast_bytes")
+
+    async def mock_probe(p):
+        p_str = str(p)
+        if "orig_v1" in p_str:
+            return v1_meta
+        if "inter_v3" in p_str:
+            return v3_meta
+        return out_meta
+
+    with patch("core.ai.tools.run_ffmpeg_with_progress", side_effect=mock_ffmpeg), \
+         patch("core.ai.tools.probe_media", side_effect=mock_probe):
+
+        res = await executor.run_execute_ffmpeg(
+            plan_title="Fast 2x from original",
+            output_filename="fast_from_v1.mp4",
+            inputs=["v1"],
+            vf_filter="setpts=PTS/2",
+            af_filter="atempo=2"
+        )
+
+        # Must succeed! If it compared against self.meta (6.0s), expected would be 3.0s and it would have failed!
+        assert res["status"] == "success"
+        assert res["deliverables"][0]["filename"] == "fast_from_v1.mp4"
+
+
+@pytest.mark.asyncio
+async def test_safe_tool_executor_sanitizes_arepeat_to_aloop(tmp_path):
+    """Verifies that hallucinated arepeat filter is automatically sanitized to aloop."""
+    from core.ai.tools import SafeToolExecutor
+
+    in_f = tmp_path / "in_sound.mp4"
+    in_f.write_bytes(b"sound_bytes")
+    meta = make_dummy_metadata(
+        file_path=in_f,
+        file_name="in_sound.mp4",
+        file_size_bytes=5_000_000,
+        duration_seconds=7.0
+    )
+    executor = SafeToolExecutor(user_id=111, task_id="task_loop_test", input_path=in_f, meta=meta)
+
+    captured_cmds = []
+    async def mock_ffmpeg(cmd, **kwargs):
+        captured_cmds.append(" ".join(cmd))
+        out_p = Path(cmd[-1])
+        out_p.write_bytes(b"looped_out_bytes")
+
+    out_meta = make_dummy_metadata(
+        file_path=tmp_path / "out_looped.mp4",
+        file_name="out_looped.mp4",
+        file_size_bytes=6_000_000,
+        duration_seconds=15.0
+    )
+
+    with patch("core.ai.tools.run_ffmpeg_with_progress", side_effect=mock_ffmpeg), \
+         patch("core.ai.tools.probe_media", AsyncMock(return_value=out_meta)):
+
+        res = await executor.run_execute_ffmpeg(
+            plan_title="Loop audio twice to fill 15s",
+            output_filename="out_looped.mp4",
+            af_filter="arepeat=2:interleaved=1:enable='between(t,0,15)'",
+            video_codec="copy",
+            audio_codec="copy",
+            extra_args=["-t", "15"]
+        )
+
+        assert res["status"] == "success"
+        assert len(captured_cmds) == 1
+        cmd_str = captured_cmds[0]
+        # arepeat must be sanitized to aloop
+        assert "arepeat" not in cmd_str
+        assert "aloop=loop=2:size=2e+09" in cmd_str
+        # audio codec must have been switched to aac because filter requires encoding
+        assert "-c:a aac" in cmd_str
+
+
+
+
+

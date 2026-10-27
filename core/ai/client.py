@@ -131,10 +131,10 @@ class OpenRouterClient:
         return bool(self.api_key and self.api_key.strip())
 
     def set_model(self, model_name: str) -> None:
-        """Sets the active model."""
+        """Sets the active model on the client instance only (no global mutation)."""
         if model_name:
             self.default_model = model_name
-            settings.OPENROUTER_MODEL = model_name
+
 
     async def chat_completion(
         self,

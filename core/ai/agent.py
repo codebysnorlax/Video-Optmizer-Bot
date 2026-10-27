@@ -7,9 +7,10 @@ and provides technical diagnosis or video optimization.
 import asyncio
 import json
 import logging
+import re
 import time
 from pathlib import Path
-from typing import List, Dict, Any, Optional, Callable, Awaitable
+from typing import List, Dict, Any, Optional, Callable, Awaitable, Tuple
 from core.probe import MediaMetadata, format_bytes, format_duration
 from core.hardware import current_hardware
 from core.engine import ProgressCallback
@@ -65,7 +66,161 @@ def sanitize_message_history(history: List[Dict[str, Any]], complete_trailing: b
             "content": "Operation completed."
         })
 
+    # Post-sanitization check: if the first message has role == "tool", prepend synthetic assistant
+    if sanitized and sanitized[0].get("role") == "tool":
+        sanitized.insert(0, {
+            "role": "assistant",
+            "content": "I performed the previous operation."
+        })
+
     return sanitized
+
+
+def compress_old_history(history: List[Dict[str, Any]], keep_recent: int = 20) -> Tuple[str, List[Dict[str, Any]]]:
+    """
+    Splits history into old (everything before the last keep_recent messages) and recent (last keep_recent messages).
+    Builds a one-paragraph summary of old turns listing all asset keys, operations performed, and user goals.
+    Returns (summary_text, recent_messages).
+    """
+    if not history:
+        return "", []
+
+    if len(history) <= keep_recent:
+        return "", list(history)
+
+    old = history[:-keep_recent]
+    recent = list(history[-keep_recent:])
+
+    user_goals: List[str] = []
+    operations: List[str] = []
+    asset_keys: List[str] = []
+    seen_assets = set()
+
+    for msg in old:
+        role = msg.get("role")
+        content = msg.get("content")
+
+        # Extract user goals
+        if role == "user" and isinstance(content, str):
+            goal = content.strip()
+            if goal and goal not in user_goals:
+                if len(goal) > 120:
+                    goal = goal[:117] + "..."
+                user_goals.append(goal)
+
+        # Extract operation names from tool messages
+        if role == "tool":
+            op_name = None
+            if isinstance(content, str):
+                try:
+                    data = json.loads(content)
+                    if isinstance(data, dict):
+                        op_name = (
+                            data.get("plan_title")
+                            or data.get("operation")
+                            or data.get("name")
+                            or data.get("recommended_action")
+                        )
+                except Exception:
+                    pass
+                if not op_name:
+                    op_name = msg.get("name") or content[:60].strip()
+            elif isinstance(content, dict):
+                op_name = (
+                    content.get("plan_title")
+                    or content.get("operation")
+                    or content.get("name")
+                    or content.get("recommended_action")
+                )
+            if not op_name and msg.get("name"):
+                op_name = msg.get("name")
+
+            if op_name:
+                op_str = str(op_name).strip()
+                if op_str and op_str not in operations:
+                    operations.append(op_str)
+
+        # Extract asset keys like [v1], [a1], etc. from any message
+        msg_str = json.dumps(msg, default=str) if isinstance(msg, dict) else str(msg)
+        for match in re.findall(r'\[([a-zA-Z0-9_-]+)\]', msg_str):
+            key = f"[{match}]"
+            if key not in seen_assets:
+                seen_assets.add(key)
+                asset_keys.append(key)
+        for match in re.findall(r'\b([vas]\d+)\b', msg_str, re.IGNORECASE):
+            key = f"[{match.lower()}]"
+            if key not in seen_assets:
+                seen_assets.add(key)
+                asset_keys.append(key)
+
+    summary_parts = []
+    if user_goals:
+        summary_parts.append(f"User goals: {'; '.join(user_goals)}.")
+    if operations:
+        summary_parts.append(f"Operations performed: {', '.join(operations)}.")
+    if asset_keys:
+        summary_parts.append(f"Assets referenced: {', '.join(asset_keys)}.")
+
+    summary_text = " ".join(summary_parts)
+    if not summary_text and old:
+        summary_text = "Previous conversation turns took place."
+
+    return summary_text, recent
+
+
+def guard_truncation_boundary(
+    full_history: List[Dict[str, Any]],
+    recent: Optional[List[Dict[str, Any]]] = None
+) -> List[Dict[str, Any]]:
+    """
+    Ensures that a truncated history does not begin with an orphaned 'tool' message.
+    If recent begins with a 'tool' message, scans backward in full_history from the cut point
+    to include the preceding 'assistant' message (which contains 'tool_calls').
+    Supports both signatures:
+      guard_truncation_boundary(full_history, recent)
+      guard_truncation_boundary(messages)
+    """
+    if recent is None:
+        messages = list(full_history)
+        if messages and messages[0].get("role") == "tool":
+            return [{
+                "role": "assistant",
+                "content": "I performed the previous operation."
+            }] + messages
+        return messages
+
+    if not recent:
+        return []
+
+    if recent[0].get("role") != "tool":
+        return list(recent)
+
+    cut_point = len(full_history) - len(recent)
+    if cut_point < 0 or cut_point >= len(full_history) or full_history[cut_point] != recent[0]:
+        found = False
+        for k in range(len(full_history) - 1, -1, -1):
+            if full_history[k] == recent[0]:
+                cut_point = k
+                found = True
+                break
+        if not found:
+            cut_point = max(0, len(full_history) - len(recent))
+
+    target_assistant = None
+    for i in range(cut_point - 1, -1, -1):
+        msg = full_history[i]
+        if msg.get("role") == "assistant":
+            target_assistant = msg
+            if msg.get("tool_calls"):
+                break
+
+    if target_assistant:
+        return [target_assistant] + list(recent)
+
+    return [{
+        "role": "assistant",
+        "content": "I performed the previous operation."
+    }] + list(recent)
 
 
 class VideoAIAgent:
@@ -198,7 +353,13 @@ class VideoAIAgent:
             "11. **Output FFprobe Awareness & Post-Execution Response:**\n"
             "   - When a tool produces output deliverables, you will receive its exact verified `ffprobe` metadata (resolution, codec, bitrate, duration, file size).\n"
             "   - In your follow-up conversational response, explicitly acknowledge what you generated citing these verified specs (e.g. resolution, duration, file size).\n"
-            "   - If the task is finished, ask what they would like to do next or if they are satisfied with the result. If a further step is needed (such as sending a new soundtrack), ask them to send the file."
+            "   - If the task is finished, ask what they would like to do next or if they are satisfied with the result. If a further step is needed (such as sending a new soundtrack), ask them to send the file.\n"
+            "12. **Audio Looping & Duration Matching:**\n"
+            "   - When asked to loop, repeat, or extend audio to fill video duration:\n"
+            "     * FFmpeg does NOT have an 'arepeat' filter! NEVER use 'arepeat'.\n"
+            "     * The correct FFmpeg audio loop filter is `aloop=loop=-1:size=2e+09` (or `aloop=loop=N:size=2e+09`).\n"
+            "     * When looping audio with `aloop`, ALWAYS include `-t <duration>` in `extra_args` or `-shortest` to prevent infinite rendering.\n"
+            "     * Use `audio_codec='aac'` (filters cannot be applied with audio_codec='copy')."
         )
 
     async def process_message(
@@ -224,7 +385,12 @@ class VideoAIAgent:
         # Build payload with dynamic system prompt and sanitized history
         system_prompt = self._build_system_prompt(user_text)
         sanitized_history = sanitize_message_history(self.history)
-        messages = [{"role": "system", "content": system_prompt}] + sanitized_history[-8:]
+        summary_text, recent_window = compress_old_history(sanitized_history)
+        recent_window = guard_truncation_boundary(sanitized_history, recent_window)
+        messages = [{"role": "system", "content": system_prompt}]
+        if summary_text:
+            messages.append({"role": "system", "content": f"Previous session context: {summary_text}"})
+        messages.extend(recent_window)
 
         try:
             assistant_msg = await self.client.chat_completion(
@@ -288,6 +454,18 @@ class VideoAIAgent:
                 final_reply=content,
                 elapsed_seconds=time.time() - start_time
             )
+            try:
+                from database.models import save_ai_session
+                await save_ai_session(
+                    self.user_id,
+                    self.task_id,
+                    self.history,
+                    self.assets,
+                    self.preferred_model or "",
+                    str(self.input_path) if self.input_path else ""
+                )
+            except Exception as e:
+                logger.warning(f"Error persisting AI session: {e}")
             return text_result
 
         # Handle Tool Calls
@@ -334,6 +512,43 @@ class VideoAIAgent:
                     except Exception as p_err:
                         logger.debug(f"Initial progress notification error: {p_err}")
 
+                # Plan preview notification
+                if progress_callback:
+                    codec = args.get("video_codec", "libx264")
+                    crf_val = args.get("crf", 22)
+                    vf = args.get("vf_filter", "")
+                    resolution = ""
+                    if vf and "scale" in vf:
+                        import re as _re
+                        scale_match = _re.search(r'scale[=:]([^,;]+)', vf)
+                        if scale_match:
+                            resolution = scale_match.group(1)
+
+                    est_time = ""
+                    if self.meta and self.meta.duration_seconds > 0:
+                        # Estimate: input_duration / 1.5x speed factor for libx264 on SDM636
+                        est_seconds = int(self.meta.duration_seconds / 1.5)
+                        from core.ai.tools import _parse_speed_factor
+                        speed_factor = _parse_speed_factor(f"{vf} {args.get('af_filter', '')}")
+                        if speed_factor and speed_factor > 0:
+                            est_seconds = int(est_seconds * speed_factor)
+                        est_time = f"~{est_seconds}s"
+
+                    preview_parts = [f"AI Plan: {plan_title}"]
+                    if codec and codec != "none":
+                        crf_str = f" CRF {crf_val}" if crf_val else ""
+                        preview_parts.append(f"Codec: {codec}{crf_str}")
+                    if resolution:
+                        preview_parts.append(f"Resolution: {resolution}")
+                    if est_time:
+                        preview_parts.append(f"Estimated time: {est_time}")
+
+                    preview_msg = " | ".join(preview_parts)
+                    try:
+                        await progress_callback(0.0, "starting", 0, 0.0, step_label=preview_msg)
+                    except Exception:
+                        pass
+
                 res = await self.tool_executor.run_execute_ffmpeg(
                     plan_title=plan_title,
                     output_filename=args.get("output_filename", "ai_optimized.mp4"),
@@ -369,6 +584,16 @@ class VideoAIAgent:
                     "content": json.dumps(res, default=str)
                 })
 
+            elif fn_name == "list_workspace_files":
+                res = await self.tool_executor.run_list_workspace_files()
+                execution_results.append(res)
+                self.history.append({
+                    "role": "tool",
+                    "tool_call_id": call_id,
+                    "name": fn_name,
+                    "content": json.dumps(res, default=str)
+                })
+
         # Primary tool result
         primary_result = execution_results[0] if execution_results else {"status": "success", "type": "none"}
 
@@ -381,14 +606,20 @@ class VideoAIAgent:
                 pass
 
         try:
-            follow_up_messages = [{"role": "system", "content": self._build_system_prompt(user_text)}] + sanitize_message_history(self.history, complete_trailing=False)[-8:]
+            sanitized_follow_up = sanitize_message_history(self.history, complete_trailing=False)
+            fu_summary, fu_recent = compress_old_history(sanitized_follow_up)
+            fu_recent = guard_truncation_boundary(sanitized_follow_up, fu_recent)
+            follow_up_messages = [{"role": "system", "content": self._build_system_prompt(user_text)}]
+            if fu_summary:
+                follow_up_messages.append({"role": "system", "content": f"Previous session context: {fu_summary}"})
+            follow_up_messages.extend(fu_recent)
             follow_up_msg = await asyncio.wait_for(
                 self.client.chat_completion(
                     messages=follow_up_messages,
                     tools=None,
                     preferred_model=self.preferred_model
                 ),
-                timeout=12.0
+                timeout=30.0
             )
             follow_up_content = (follow_up_msg.get("content") or "").strip()
             if not follow_up_content:
@@ -404,16 +635,21 @@ class VideoAIAgent:
             self.history.append({"role": "assistant", "content": follow_up_content})
             primary_result["assistant_text"] = follow_up_content
         except Exception as follow_up_err:
-            logger.warning(f"Error in follow-up AI completion: {follow_up_err}")
-            out_ffprobe = primary_result.get("ffprobe") or {}
-            res_str = out_ffprobe.get("resolution", primary_result.get("resolution", ""))
-            size_str = out_ffprobe.get("formatted_size", primary_result.get("formatted_size", ""))
-            dur_str = out_ffprobe.get("formatted_duration", primary_result.get("duration", ""))
-            spec_note = f" ({res_str}, {size_str}, {dur_str})" if (res_str and size_str) else ""
-            fallback_text = (
-                f"I have executed the operation: {primary_result.get('plan_title', 'video processing')}{spec_note}. "
-                "What would you like to do next with this file?"
-            )
+            logger.warning(f"Error in follow-up AI completion: {type(follow_up_err).__name__} ({follow_up_err or 'timeout'})")
+            if primary_result.get("status") == "error":
+                fallback_text = (
+                    f"The operation could not be completed: {primary_result.get('error', 'an error occurred during FFmpeg execution')}."
+                )
+            else:
+                out_ffprobe = primary_result.get("ffprobe") or {}
+                res_str = out_ffprobe.get("resolution", primary_result.get("resolution", ""))
+                size_str = out_ffprobe.get("formatted_size", primary_result.get("formatted_size", ""))
+                dur_str = out_ffprobe.get("formatted_duration", primary_result.get("duration", ""))
+                spec_note = f" ({res_str}, {size_str}, {dur_str})" if (res_str and size_str) else ""
+                fallback_text = (
+                    f"I have executed the operation: {primary_result.get('plan_title', 'video processing')}{spec_note}. "
+                    "What would you like to do next with this file?"
+                )
             self.history.append({"role": "assistant", "content": fallback_text})
             primary_result["assistant_text"] = fallback_text
 
@@ -435,4 +671,20 @@ class VideoAIAgent:
             elapsed_seconds=time.time() - start_time
         )
 
+        try:
+            from database.models import save_ai_session
+            await save_ai_session(
+                self.user_id,
+                self.task_id,
+                self.history,
+                self.assets,
+                self.preferred_model or "",
+                str(self.input_path) if self.input_path else ""
+            )
+        except Exception as e:
+            logger.warning(f"Error persisting AI session: {e}")
+
         return primary_result
+
+    # Alias for run_turn (compatible with production hardening tasks)
+    run_turn = process_message
