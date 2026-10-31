@@ -30,7 +30,7 @@ storage/debug-ai/*
 
 # Environment variables
 .env
-
+idea/
 # Testing & Logs
 .pytest_cache/
 *.log
